@@ -182,7 +182,7 @@ public class VideoDepacketizer {
 		// duplicate of the original packet
 		if (packetsInFrame == 1 && packetIndex == 1 &&
 			nextPacketNumber == 0 && frameIndex == nextFrameNumber) {
-			System.out.println("Using FEC for error correction");
+			LimeLog.warning("Using FEC for error correction");
 			nextPacketNumber = 1;
 		}
 		// Discard FEC data early
@@ -204,7 +204,7 @@ public class VideoDepacketizer {
 			// Nope, but we can still work with it if it's
 			// the start of the next frame
 			if (firstPacket) {
-				System.out.println("Got start of frame "+frameIndex+
+				LimeLog.warning("Got start of frame "+frameIndex+
 						" when expecting packet "+nextPacketNumber+
 						" of frame "+nextFrameNumber);
 				controlListener.connectionDetectedFrameLoss(startFrameNumber, frameIndex - 1);
@@ -213,7 +213,7 @@ public class VideoDepacketizer {
 				clearAvcFrameState();
 			}
 			else {
-				System.out.println("Got packet "+packetIndex+" of frame "+frameIndex+
+				LimeLog.warning("Got packet "+packetIndex+" of frame "+frameIndex+
 						" when expecting packet "+nextPacketNumber+
 						" of frame "+nextFrameNumber);
 				// We dropped the start of this frame too, so pick up on the next frame
@@ -222,14 +222,14 @@ public class VideoDepacketizer {
 			}
 		}
 		else if (frameIndex < nextFrameNumber) {
-			System.out.println("Frame "+frameIndex+" is behind our current frame number "+nextFrameNumber);
+			LimeLog.warning("Frame "+frameIndex+" is behind our current frame number "+nextFrameNumber);
 			// Discard the frame silently if it's behind our current sequence number
 			return;
 		}
 		
 		// We know it's the right frame, now check the packet number
 		if (packetIndex != nextPacketNumber) {
-			System.out.println("Frame "+frameIndex+": expected packet "+nextPacketNumber+" but got "+packetIndex);
+			LimeLog.warning("Frame "+frameIndex+": expected packet "+nextPacketNumber+" but got "+packetIndex);
 			// At this point, we're guaranteed that it's not FEC data that we lost
 			waitingForFrameStart = true;
 			return;
