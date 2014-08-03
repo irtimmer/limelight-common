@@ -6,7 +6,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import com.limelight.LimeLog;
 import com.limelight.nvstream.av.ByteBufferDescriptor;
 import com.limelight.nvstream.av.DecodeUnit;
-import com.limelight.nvstream.av.RtpPacket;
 import com.limelight.nvstream.av.ConnectionStatusListener;
 
 public class VideoDepacketizer {
@@ -17,25 +16,28 @@ public class VideoDepacketizer {
 	private int currentlyDecoding = DecodeUnit.TYPE_UNKNOWN;
 	
 	// Sequencing state
+	private int lastPacketInStream = 0;
 	private int nextFrameNumber = 1;
 	private int nextPacketNumber;
 	private int startFrameNumber = 1;
 	private boolean waitingForNextSuccessfulFrame;
 	private boolean gotNextFrameStart;
+	private long frameStartTime;
 	
 	// Cached objects
-	private ByteBufferDescriptor cachedDesc = new ByteBufferDescriptor(null, 0, 0);
+	private ByteBufferDescriptor cachedReassemblyDesc = new ByteBufferDescriptor(null, 0, 0);
+	private ByteBufferDescriptor cachedSpecialDesc = new ByteBufferDescriptor(null, 0, 0);
 	
 	private ConnectionStatusListener controlListener;
-	private VideoDecoderRenderer directSubmitDr;
+	private int nominalPacketSize;
 	
 	private static final int DU_LIMIT = 5;
 	private LinkedBlockingQueue<DecodeUnit> decodedUnits = new LinkedBlockingQueue<DecodeUnit>(DU_LIMIT);
 	
-	public VideoDepacketizer(VideoDecoderRenderer directSubmitDr, ConnectionStatusListener controlListener)
+	public VideoDepacketizer(ConnectionStatusListener controlListener, int nominalPacketSize)
 	{
-		this.directSubmitDr = directSubmitDr;
 		this.controlListener = controlListener;
+		this.nominalPacketSize = nominalPacketSize;
 	}
 	
 	private void clearAvcFrameState()
@@ -48,30 +50,9 @@ public class VideoDepacketizer {
 	{
 		// This is the start of a new frame
 		if (avcFrameDataChain != null && avcFrameDataLength != 0) {
-			int flags = 0;
-			
-			ByteBufferDescriptor firstBuffer = avcFrameDataChain.getFirst();
-			
-			if (NAL.getSpecialSequenceDescriptor(firstBuffer, cachedDesc) && NAL.isAvcFrameStart(cachedDesc)) {
-				switch (cachedDesc.data[cachedDesc.offset+cachedDesc.length]) {
-				case 0x67:
-				case 0x68:
-					flags |= DecodeUnit.DU_FLAG_CODEC_CONFIG;
-					break;
-					
-				case 0x65:
-					flags |= DecodeUnit.DU_FLAG_SYNC_FRAME;
-					break;
-				}
-			}
-			
 			// Construct the H264 decode unit
-			DecodeUnit du = new DecodeUnit(DecodeUnit.TYPE_H264, avcFrameDataChain, avcFrameDataLength, flags, frameNumber);
-			if (directSubmitDr != null) {
-				// Submit directly to the decoder
-				directSubmitDr.submitDecodeUnit(du);
-			}
-			else if (!decodedUnits.offer(du)) {
+			DecodeUnit du = new DecodeUnit(DecodeUnit.TYPE_H264, avcFrameDataChain, avcFrameDataLength, frameNumber, frameStartTime);
+			if (!decodedUnits.offer(du)) {
 				LimeLog.warning("Video decoder is too slow! Forced to drop decode units");
 				
 				// Invalidate all frames from the start of the DU queue
@@ -91,7 +72,7 @@ public class VideoDepacketizer {
 		}
 	}
 	
-	public void addInputDataSlow(VideoPacket packet, ByteBufferDescriptor location)
+	private void addInputDataSlow(VideoPacket packet, ByteBufferDescriptor location)
 	{
 		while (location.length != 0)
 		{
@@ -99,15 +80,15 @@ public class VideoDepacketizer {
 			int start = location.offset;
 
 			// Check for a special sequence
-			if (NAL.getSpecialSequenceDescriptor(location, cachedDesc))
+			if (NAL.getSpecialSequenceDescriptor(location, cachedSpecialDesc))
 			{
-				if (NAL.isAvcStartSequence(cachedDesc))
+				if (NAL.isAvcStartSequence(cachedSpecialDesc))
 				{
 					// We're decoding H264 now
 					currentlyDecoding = DecodeUnit.TYPE_H264;
 
 					// Check if it's the end of the last frame
-					if (NAL.isAvcFrameStart(cachedDesc))
+					if (NAL.isAvcFrameStart(cachedSpecialDesc))
 					{
 						// Reassemble any pending AVC NAL
 						reassembleAvcFrame(packet.getFrameIndex());
@@ -118,14 +99,14 @@ public class VideoDepacketizer {
 					}
 
 					// Skip the start sequence
-					location.length -= cachedDesc.length;
-					location.offset += cachedDesc.length;
+					location.length -= cachedSpecialDesc.length;
+					location.offset += cachedSpecialDesc.length;
 				}
 				else
 				{
 					// Check if this is padding after a full AVC frame
 					if (currentlyDecoding == DecodeUnit.TYPE_H264 &&
-						NAL.isPadding(cachedDesc)) {
+						NAL.isPadding(cachedSpecialDesc)) {
 						// The decode unit is complete
 						reassembleAvcFrame(packet.getFrameIndex());
 					}
@@ -146,12 +127,12 @@ public class VideoDepacketizer {
 				if (location.data[location.offset] == 0x00)
 				{
 					// Check if this should end the current NAL
-					if (NAL.getSpecialSequenceDescriptor(location, cachedDesc))
+					if (NAL.getSpecialSequenceDescriptor(location, cachedSpecialDesc))
 					{
 						// Only stop if we're decoding something or this
 						// isn't padding
 						if (currentlyDecoding != DecodeUnit.TYPE_UNKNOWN ||
-							!NAL.isPadding(cachedDesc))
+							!NAL.isPadding(cachedSpecialDesc))
 						{
 							break;
 						}
@@ -174,28 +155,30 @@ public class VideoDepacketizer {
 		}
 	}
 	
-	public void addInputDataFast(VideoPacket packet, ByteBufferDescriptor location, boolean firstPacket)
+	private void addInputDataFast(VideoPacket packet, ByteBufferDescriptor location, boolean firstPacket)
 	{
 		if (firstPacket) {
 			// Setup state for the new frame
+			frameStartTime = System.currentTimeMillis();
 			avcFrameDataChain = new LinkedList<ByteBufferDescriptor>();
 			avcFrameDataLength = 0;
 		}
 		
 		// Add the payload data to the chain
-		avcFrameDataChain.add(location);
+		avcFrameDataChain.add(new ByteBufferDescriptor(location));
 		avcFrameDataLength += location.length;
 	}
 	
 	public void addInputData(VideoPacket packet)
-	{	
-		ByteBufferDescriptor location = packet.getNewPayloadDescriptor();
+	{
+		// Load our reassembly descriptor
+		packet.initializePayloadDescriptor(cachedReassemblyDesc);
 		
 		// Runt packets get decoded using the slow path
 		// These packets stand alone so there's no need to verify
 		// sequencing before submitting
-		if (location.length < 968) {
-			addInputDataSlow(packet, location);
+		if (cachedReassemblyDesc.length < nominalPacketSize - VideoPacket.HEADER_SIZE) {
+			addInputDataSlow(packet, cachedReassemblyDesc);
             return;
 		}
 		
@@ -287,24 +270,32 @@ public class VideoDepacketizer {
 			}
 		}
 		
+		int streamPacketIndex = packet.getStreamPacketIndex();
+		if (streamPacketIndex != (int)(lastPacketInStream + 1)) {
+			// Packets were lost so report this to the server
+			controlListener.connectionLostPackets(lastPacketInStream, streamPacketIndex);
+		}
+		lastPacketInStream = streamPacketIndex;
+		
 		nextPacketNumber++;
 		
 		// Remove extra padding
-		location.length = packet.getPayloadLength();
+		cachedReassemblyDesc.length = packet.getPayloadLength();
 		
 		if (firstPacket)
 		{
-			if (NAL.getSpecialSequenceDescriptor(location, cachedDesc) && NAL.isAvcFrameStart(cachedDesc)
-				&& cachedDesc.data[cachedDesc.offset+cachedDesc.length] == 0x67)
+			if (NAL.getSpecialSequenceDescriptor(cachedReassemblyDesc, cachedSpecialDesc)
+				&& NAL.isAvcFrameStart(cachedSpecialDesc)
+				&& cachedSpecialDesc.data[cachedSpecialDesc.offset+cachedSpecialDesc.length] == 0x67)
 			{
 				// SPS and PPS prefix is padded between NALs, so we must decode it with the slow path
 				clearAvcFrameState();
-				addInputDataSlow(packet, location);
+				addInputDataSlow(packet, cachedReassemblyDesc);
 				return;
 			}
 		}
 
-		addInputDataFast(packet, location, firstPacket);
+		addInputDataFast(packet, cachedReassemblyDesc, firstPacket);
 		
 		// We can't use the EOF flag here because real frames can be split across
 		// multiple "frames" when packetized to fit under the bandwidth ceiling
@@ -326,15 +317,14 @@ public class VideoDepacketizer {
 		}
 	}
 	
-	public void addInputData(RtpPacket packet)
-	{
-		ByteBufferDescriptor rtpPayload = packet.getNewPayloadDescriptor();
-		addInputData(new VideoPacket(rtpPayload));
-	}
-	
-	public DecodeUnit getNextDecodeUnit() throws InterruptedException
+	public DecodeUnit takeNextDecodeUnit() throws InterruptedException
 	{
 		return decodedUnits.take();
+	}
+	
+	public DecodeUnit pollNextDecodeUnit()
+	{
+		return decodedUnits.poll();
 	}
 }
 

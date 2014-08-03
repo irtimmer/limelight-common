@@ -124,7 +124,7 @@ public class SdpGenerator {
 		addSessionAttribute(config, "x-nv-video[0].maxFPS", ""+sc.getRefreshRate());
 		addSessionAttribute(config, "x-nv-video[0].iFrameOnDemand", "1");
 		addSessionAttributeInt(config, "x-nv-video[0].transferProtocol", 1);
-		if (sc.getHeight() >= 1080) {
+		if (sc.getHeight() >= 1080 && sc.getRefreshRate() >= 60) {
 			addSessionAttributeInt(config, "x-nv-video[0].rateControlMode", 4);
 			addSessionAttribute(config, "x-nv-video[0].averageBitrate", "30");
 			addSessionAttribute(config, "x-nv-video[0].peakBitrate", "30");
@@ -139,7 +139,7 @@ public class SdpGenerator {
 		addSessionAttribute(config, "x-nv-video[0].vbvMultiplier", "100");
 		addSessionAttribute(config, "x-nv-video[0].slicesPerFrame", "4");
 		addSessionAttribute(config, "x-nv-video[0].numTemporalLayers", "0");
-		addSessionAttribute(config, "x-nv-video[0].packetSize", "1024");
+		addSessionAttribute(config, "x-nv-video[0].packetSize", ""+sc.getMaxPacketSize());
 		addSessionAttribute(config, "x-nv-video[0].enableSubframeEncoding", "0");
 		addSessionAttribute(config, "x-nv-video[0].refPicInvalidation", "1");
 		addSessionAttribute(config, "x-nv-video[0].pingBackIntervalMs", "3000");
@@ -159,27 +159,9 @@ public class SdpGenerator {
 		addSessionAttribute(config, "x-nv-vqos[0].ts.maximumBitrate", "10");
 		addSessionAttribute(config, "x-nv-vqos[0].bw.flags", "819"); // Bit 2 being set causes picture problems (should be 823)
 		
-		// Effective bitrate ceiling
-		if (sc.getHeight() >= 1080) {
-			if (sc.getRefreshRate() >= 60) {
-				addSessionAttribute(config, "x-nv-vqos[0].bw.maximumBitrate", ""+sc.getBitrate());
-				addSessionAttribute(config, "x-nv-vqos[0].bw.minimumBitrate", "20000");
-			}
-			else {
-				addSessionAttribute(config, "x-nv-vqos[0].bw.maximumBitrate", ""+sc.getBitrate());
-				addSessionAttribute(config, "x-nv-vqos[0].bw.minimumBitrate", "10000");
-			}
-		}
-		else {
-			if (sc.getRefreshRate() >= 60) {
-				addSessionAttribute(config, "x-nv-vqos[0].bw.maximumBitrate", ""+sc.getBitrate());
-				addSessionAttribute(config, "x-nv-vqos[0].bw.minimumBitrate", "8000");
-			}
-			else {
-				addSessionAttribute(config, "x-nv-vqos[0].bw.maximumBitrate", ""+sc.getBitrate());
-				addSessionAttribute(config, "x-nv-vqos[0].bw.minimumBitrate", "4000");
-			}
-		}
+		// We clamp to min = max so manual bitrate settings take effect without time to scale up
+		addSessionAttribute(config, "x-nv-vqos[0].bw.maximumBitrate", ""+sc.getBitrate());
+		addSessionAttribute(config, "x-nv-vqos[0].bw.minimumBitrate", ""+sc.getBitrate());
 
 		addSessionAttribute(config, "x-nv-vqos[0].bw.statsTime", "50");
 		addSessionAttribute(config, "x-nv-vqos[0].bw.zeroLossCount", "3000");
@@ -214,7 +196,7 @@ public class SdpGenerator {
 		
 		addSessionAttribute(config, "x-nv-vqos[0].bw.pf.enableFlags", "3");
 		
-		if (sc.getHeight() >= 1080) {
+		if (sc.getHeight() >= 1080 && sc.getRefreshRate() >= 60) {
 			addSessionAttribute(config, "x-nv-vqos[0].bw.pf.lowBitrate30FpsThreshold", "5000");
 			addSessionAttribute(config, "x-nv-vqos[0].bw.pf.lowBitrate60FpsThreshold", "5000");
 			addSessionAttribute(config, "x-nv-vqos[0].bw.pf.highBitrateThreshold", "7000");

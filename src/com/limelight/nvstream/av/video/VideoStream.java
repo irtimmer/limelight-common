@@ -12,10 +12,8 @@ import java.util.LinkedList;
 
 import com.limelight.nvstream.NvConnectionListener;
 import com.limelight.nvstream.StreamConfiguration;
-import com.limelight.nvstream.av.ByteBufferDescriptor;
-import com.limelight.nvstream.av.DecodeUnit;
-import com.limelight.nvstream.av.RtpPacket;
 import com.limelight.nvstream.av.ConnectionStatusListener;
+import com.limelight.nvstream.av.RtpPacket;
 
 public class VideoStream {
 	public static final int RTP_PORT = 47998;
@@ -30,7 +28,7 @@ public class VideoStream {
 	// The ring size MUST be greater than or equal to
 	// the maximum number of packets in a fully
 	// presentable frame
-	public static final int VIDEO_RING_SIZE = 192;
+	public static final int VIDEO_RING_SIZE = 384;
 	
 	private InetAddress host;
 	private DatagramSocket rtp;
@@ -99,7 +97,7 @@ public class VideoStream {
 
 	private void readFirstFrame() throws IOException
 	{
-		byte[] firstFrame = new byte[MAX_PACKET_SIZE];
+		byte[] firstFrame = new byte[streamConfig.getMaxPacketSize()];
 		
 		firstFrameSocket = new Socket();
 		firstFrameSocket.setSoTimeout(FIRST_FRAME_TIMEOUT);
@@ -119,7 +117,9 @@ public class VideoStream {
 				offset += bytesRead;
 			}
 			
-			depacketizer.addInputData(new VideoPacket(new ByteBufferDescriptor(firstFrame, 0, offset)));
+			VideoPacket packet = new VideoPacket(firstFrame);
+			packet.initializeWithLengthNoRtpHeader(offset);
+			depacketizer.addInputData(packet);
 		} finally {
 			firstFrameSocket.close();
 			firstFrameSocket = null;
@@ -140,12 +140,7 @@ public class VideoStream {
 			decRend.setup(streamConfig.getWidth(), streamConfig.getHeight(),
 					60, renderTarget, drFlags);
 			
-			if ((decRend.getCapabilities() & VideoDecoderRenderer.CAPABILITY_DIRECT_SUBMIT) != 0) {
-				depacketizer = new VideoDepacketizer(decRend, avConnListener);
-			}
-			else {
-				depacketizer = new VideoDepacketizer(null, avConnListener);
-			}
+			depacketizer = new VideoDepacketizer(avConnListener, streamConfig.getMaxPacketSize());
 		}
 	}
 
@@ -173,42 +168,10 @@ public class VideoStream {
 			// early packets
 			startReceiveThread();
 			
-			// Start a decode thread if we're not doing direct submit
-			if ((decRend.getCapabilities() & VideoDecoderRenderer.CAPABILITY_DIRECT_SUBMIT) == 0) {
-				startDecoderThread();
-			}
-			
 			// Start the renderer
-			decRend.start();
+			decRend.start(depacketizer);
 			startedRendering = true;
 		}
-	}
-	
-	private void startDecoderThread()
-	{
-		Thread t = new Thread() {
-			@Override
-			public void run() {
-				// Read the decode units generated from the RTP stream
-				while (!isInterrupted())
-				{
-					DecodeUnit du;
-					
-					try {
-						du = depacketizer.getNextDecodeUnit();
-					} catch (InterruptedException e) {
-						listener.connectionTerminated(e);
-						return;
-					}
-					
-					decRend.submitDecodeUnit(du);
-				}
-			}
-		};
-		threads.add(t);
-		t.setName("Video - Decoder");
-		t.setPriority(Thread.MAX_PRIORITY);
-		t.start();
 	}
 	
 	private void startReceiveThread()
@@ -217,31 +180,30 @@ public class VideoStream {
 		Thread t = new Thread() {
 			@Override
 			public void run() {
-				ByteBufferDescriptor ring[] = new ByteBufferDescriptor[VIDEO_RING_SIZE];
+				VideoPacket ring[] = new VideoPacket[VIDEO_RING_SIZE];
 				int ringIndex = 0;
 				
 				// Preinitialize the ring buffer
+				int requiredBufferSize = streamConfig.getMaxPacketSize() + RtpPacket.HEADER_SIZE;
 				for (int i = 0; i < VIDEO_RING_SIZE; i++) {
-					ring[i] = new ByteBufferDescriptor(new byte[MAX_PACKET_SIZE], 0, MAX_PACKET_SIZE);
+					ring[i] = new VideoPacket(new byte[requiredBufferSize]);
 				}
 
-				ByteBufferDescriptor desc;
+				byte[] buffer;
 				DatagramPacket packet = new DatagramPacket(new byte[1], 1); // Placeholder array
 				while (!isInterrupted())
 				{
 					try {
 						// Pull the next buffer in the ring and reset it
-						desc = ring[ringIndex];
-						desc.length = MAX_PACKET_SIZE;
-						desc.offset = 0;
+						buffer = ring[ringIndex].getBuffer();
 
 						// Read the video data off the network
-						packet.setData(desc.data, desc.offset, desc.length);
+						packet.setData(buffer, 0, buffer.length);
 						rtp.receive(packet);
 						
 						// Submit video data to the depacketizer
-						desc.length = packet.getLength();
-						depacketizer.addInputData(new RtpPacket(desc));
+						ring[ringIndex].initializeWithLength(packet.getLength());
+						depacketizer.addInputData(ring[ringIndex]);
 						ringIndex = (ringIndex + 1) % VIDEO_RING_SIZE;
 					} catch (IOException e) {
 						listener.connectionTerminated(e);
@@ -252,6 +214,7 @@ public class VideoStream {
 		};
 		threads.add(t);
 		t.setName("Video - Receive");
+		t.setPriority(Thread.MAX_PRIORITY);
 		t.start();
 	}
 	
