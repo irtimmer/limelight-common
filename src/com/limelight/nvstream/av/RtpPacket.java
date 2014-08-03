@@ -1,29 +1,51 @@
 package com.limelight.nvstream.av;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 public class RtpPacket {
 	
 	private byte packetType;
 	private short seqNum;
+	private int headerSize;
+	
 	private ByteBufferDescriptor buffer;
+	private ByteBuffer bb;
 	
-	public static final int HEADER_SIZE = 12;
+	public static final int FLAG_EXTENSION = 0x10;
 	
-	public RtpPacket(ByteBufferDescriptor buffer)
+	public static final int FIXED_HEADER_SIZE = 12;
+	public static final int MAX_HEADER_SIZE = 16;
+
+	
+	public RtpPacket(byte[] buffer)
 	{
-		this.buffer = new ByteBufferDescriptor(buffer);
+		this.buffer = new ByteBufferDescriptor(buffer, 0, buffer.length);
+		this.bb = ByteBuffer.wrap(buffer).order(ByteOrder.BIG_ENDIAN);
+	}
+	
+	public void initializeWithLength(int length)
+	{
+		// Rewind to start
+		bb.rewind();
 		
-		ByteBuffer bb = ByteBuffer.wrap(buffer.data, buffer.offset, buffer.length);
-		
-		// Discard the first byte
-		bb.position(bb.position()+1);
+		// Read the RTP header byte
+		byte header = bb.get();
 		
 		// Get the packet type
 		packetType = bb.get();
 		
 		// Get the sequence number
 		seqNum = bb.getShort();
+		
+		// If an extension is present, read the fields
+		headerSize = FIXED_HEADER_SIZE;
+		if ((header & FLAG_EXTENSION) != 0) {
+			headerSize += 4; // 2 additional fields
+		}
+		
+		// Update descriptor length
+		buffer.length = length;
 	}
 	
 	public byte getPacketType()
@@ -36,13 +58,13 @@ public class RtpPacket {
 		return seqNum;
 	}
 	
-	public byte[] getBackingBuffer()
+	public byte[] getBuffer()
 	{
 		return buffer.data;
 	}
 	
-	public ByteBufferDescriptor getNewPayloadDescriptor()
+	public void initializePayloadDescriptor(ByteBufferDescriptor bb)
 	{
-		return new ByteBufferDescriptor(buffer.data, buffer.offset+HEADER_SIZE, buffer.length-HEADER_SIZE);
+		bb.reinitialize(buffer.data, buffer.offset+headerSize, buffer.length-headerSize);
 	}
 }

@@ -2,11 +2,9 @@ package com.limelight.nvstream;
 
 import java.io.IOException;
 import java.net.InetAddress;
-import java.net.NetworkInterface;
-import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.security.NoSuchAlgorithmException;
-import java.util.Enumeration;
+import java.security.SecureRandom;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -35,6 +33,7 @@ public class NvConnection {
 	private NvConnectionListener listener;
 	private StreamConfiguration config;
 	private LimelightCryptoProvider cryptoProvider;
+	private String uniqueId;
 	
 	private InetAddress hostAddr;
 	private ControlStream controlStream;
@@ -49,15 +48,17 @@ public class NvConnection {
 	private AudioRenderer audioRenderer;
 	private String localDeviceName;
 	private SecretKey riKey;
+	private int riKeyId;
 	
 	private ThreadPoolExecutor threadPool;
 	
-	public NvConnection(String host, NvConnectionListener listener, StreamConfiguration config, LimelightCryptoProvider cryptoProvider)
+	public NvConnection(String host, String uniqueId, NvConnectionListener listener, StreamConfiguration config, LimelightCryptoProvider cryptoProvider)
 	{
 		this.host = host;
 		this.listener = listener;
 		this.config = config;
 		this.cryptoProvider = cryptoProvider;
+		this.uniqueId = uniqueId;
 		
 		try {
 			// This is unique per connection
@@ -66,6 +67,8 @@ public class NvConnection {
 			// Should never happen
 			e.printStackTrace();
 		}
+		
+		this.riKeyId = generateRiKeyId();
 		
 		this.threadPool = new ThreadPoolExecutor(1, 1, Long.MAX_VALUE, TimeUnit.DAYS,
 				new LinkedBlockingQueue<Runnable>(), new ThreadPoolExecutor.DiscardPolicy());
@@ -80,63 +83,8 @@ public class NvConnection {
 		return keyGen.generateKey();
 	}
 	
-	public static String getMacAddressString() throws SocketException {
-		Enumeration<NetworkInterface> ifaceList;
-		NetworkInterface selectedIface = null;
-
-		// First look for a WLAN interface (since those generally aren't removable)
-		ifaceList = NetworkInterface.getNetworkInterfaces();
-		while (selectedIface == null && ifaceList.hasMoreElements()) {
-			NetworkInterface iface = ifaceList.nextElement();
-
-			if (iface.getName().startsWith("wlan") && 
-				iface.getHardwareAddress() != null &&
-				iface.getHardwareAddress().length > 0) {
-				selectedIface = iface;
-			}
-		}
-
-		// If we didn't find that, look for an Ethernet interface
-		ifaceList = NetworkInterface.getNetworkInterfaces();
-		while (selectedIface == null && ifaceList.hasMoreElements()) {
-			NetworkInterface iface = ifaceList.nextElement();
-
-			if (iface.getName().startsWith("eth") &&
-				iface.getHardwareAddress() != null &&
-				iface.getHardwareAddress().length > 0) {
-				selectedIface = iface;
-			}
-		}
-		
-		// Now just find something with a MAC address
-		ifaceList = NetworkInterface.getNetworkInterfaces();
-		while (selectedIface == null && ifaceList.hasMoreElements()) {
-			NetworkInterface iface = ifaceList.nextElement();
-
-			if (iface.getHardwareAddress() != null &&
-				iface.getHardwareAddress().length > 0) {
-				selectedIface = iface;
-				break;
-			}
-		}
-		
-		if (selectedIface == null) {
-			return null;
-		}
-
-		byte[] macAddress = selectedIface.getHardwareAddress();
-		if (macAddress != null) {
-			StringBuilder addrStr = new StringBuilder();
-			for (int i = 0; i < macAddress.length; i++) {
-				addrStr.append(String.format("%02x", macAddress[i]));
-				if (i != macAddress.length - 1) {
-					addrStr.append(':');
-				}
-			}
-			return addrStr.toString();
-		}
-		
-		return null;
+	private static int generateRiKeyId() {
+		return new SecureRandom().nextInt();
 	}
 	
 	public void stop()
@@ -160,12 +108,12 @@ public class NvConnection {
 		}
 	}
 	
-	private boolean startSteamBigPicture() throws XmlPullParserException, IOException
+	private boolean startApp() throws XmlPullParserException, IOException
 	{
-		NvHTTP h = new NvHTTP(hostAddr, getMacAddressString(), localDeviceName, cryptoProvider);
+		NvHTTP h = new NvHTTP(hostAddr, uniqueId, localDeviceName, cryptoProvider);
 		
-		if (h.getServerVersion().startsWith("1.")) {
-			listener.displayMessage("Limelight now requires GeForce Experience 2.0.1 or later. Please upgrade GFE on your PC and try again.");
+		if (!h.getServerVersion().startsWith("3.")) {
+			listener.displayMessage("Limelight now requires GeForce Experience 2.1.1 or later. Please upgrade GFE on your PC and try again.");
 			return false;
 		}
 		
@@ -173,19 +121,21 @@ public class NvConnection {
 			listener.displayMessage("Device not paired with computer");
 			return false;
 		}
-		
-		NvApp app = h.getSteamApp();
+				
+		NvApp app = h.getApp(config.getApp());
 		if (app == null) {
-			listener.displayMessage("Steam not found in GFE app list");
+			listener.displayMessage("The app " + config.getApp() + " is not in GFE app list");
 			return false;
 		}
 		
 		// If there's a game running, resume it
 		if (h.getCurrentGame() != 0) {
 			try {
-				if (!h.resumeApp(riKey)) {
+				if (h.getCurrentGame() == app.getAppId() && !h.resumeApp(riKey, riKeyId)) {
 					listener.displayMessage("Failed to resume existing session");
 					return false;
+				} else if (h.getCurrentGame() != app.getAppId()) {
+					return quitAndLaunch(h, app);
 				}
 			} catch (GfeHttpResponseException e) {
 				if (e.getErrorCode() == 470) {
@@ -196,22 +146,45 @@ public class NvConnection {
 							"device or the PC itself and try again. (Error code: "+e.getErrorCode()+")");
 					return false;
 				}
-				else {
+				else if (e.getErrorCode() == 525) {
+					listener.displayMessage("The application is minimized. Resume it on the PC manually or " +
+							"quit the session and start streaming again.");
+					return false;
+				} else {
 					throw e;
 				}
 			}
+			
 			LimeLog.info("Resumed existing game session");
+			return true;
 		}
 		else {
-			// Launch the app since it's not running
-			int gameSessionId = h.launchApp(app.getAppId(), config.getWidth(),
-					config.getHeight(), config.getRefreshRate(), riKey);
-			if (gameSessionId == 0) {
-				listener.displayMessage("Failed to launch application");
-				return false;
-			}
-			LimeLog.info("Launched new game session");
+			return launchNotRunningApp(h, app);
 		}
+	}
+
+	protected boolean quitAndLaunch(NvHTTP h, NvApp app) throws IOException,
+			XmlPullParserException {
+		if (!h.quitApp()) {
+			listener.displayMessage("Failed to quit previous session! You must quit it manually");
+			return false;
+		} else {
+			return launchNotRunningApp(h, app);
+		}
+	}
+	
+	private boolean launchNotRunningApp(NvHTTP h, NvApp app) 
+			throws IOException, XmlPullParserException {
+		// Launch the app since it's not running
+		int gameSessionId = h.launchApp(app.getAppId(), config.getWidth(),
+				config.getHeight(), config.getRefreshRate(), riKey, config.getSops(),
+				riKeyId);
+		if (gameSessionId == 0) {
+			listener.displayMessage("Failed to launch application");
+			return false;
+		}
+		
+		LimeLog.info("Launched new game session");
 		
 		return true;
 	}
@@ -234,15 +207,13 @@ public class NvConnection {
 	private boolean startVideoStream() throws IOException
 	{
 		videoStream = new VideoStream(hostAddr, listener, controlStream, config);
-		videoStream.startVideoStream(videoDecoderRenderer, videoRenderTarget, drFlags);
-		return true;
+		return videoStream.startVideoStream(videoDecoderRenderer, videoRenderTarget, drFlags);
 	}
 	
 	private boolean startAudioStream() throws IOException
 	{
 		audioStream = new AudioStream(hostAddr, listener, audioRenderer);
-		audioStream.startAudioStream();
-		return true;
+		return audioStream.startAudioStream();
 	}
 	
 	private boolean startInputConnection() throws IOException
@@ -251,7 +222,7 @@ public class NvConnection {
 		// it to the instance variable once the object is properly initialized.
 		// This avoids the race where inputStream != null but inputStream.initialize()
 		// has not returned yet.
-		NvController tempController = new NvController(hostAddr, riKey);
+		NvController tempController = new NvController(hostAddr, riKey, riKeyId);
 		tempController.initialize();
 		inputStream = tempController;
 		return true;
@@ -267,7 +238,7 @@ public class NvConnection {
 				switch (currentStage)
 				{
 				case LAUNCH_APP:
-					success = startSteamBigPicture();
+					success = startApp();
 					break;
 
 				case RTSP_HANDSHAKE:

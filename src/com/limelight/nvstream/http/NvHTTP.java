@@ -13,6 +13,7 @@ import java.net.URLConnection;
 import java.util.LinkedList;
 import java.util.Scanner;
 import java.util.Stack;
+import java.util.UUID;
 
 import javax.crypto.SecretKey;
 
@@ -20,14 +21,16 @@ import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
 import org.xmlpull.v1.XmlPullParserFactory;
 
+import com.limelight.nvstream.http.PairingManager.PairState;
+
 
 public class NvHTTP {
 	private String uniqueId;
 	private PairingManager pm;
-	private LimelightCryptoProvider cryptoProvider;
+	private InetAddress address;
 
 	public static final int PORT = 47984;
-	public static final int CONNECTION_TIMEOUT = 5000;
+	public static final int CONNECTION_TIMEOUT = 2000;
 	
 	private final boolean verbose = false;
 
@@ -35,7 +38,7 @@ public class NvHTTP {
 	
 	public NvHTTP(InetAddress host, String uniqueId, String deviceName, LimelightCryptoProvider cryptoProvider) {
 		this.uniqueId = uniqueId;
-		this.cryptoProvider = cryptoProvider;
+		this.address = host;
 		
 		String safeAddress;
 		if (host instanceof Inet6Address) {
@@ -96,6 +99,48 @@ public class NvHTTP {
 			throw new GfeHttpResponseException(statusCode, xpp.getAttributeValue(XmlPullParser.NO_NAMESPACE, "status_message"));
 		}
 	}
+	
+	public ComputerDetails getComputerDetails() throws MalformedURLException, IOException, XmlPullParserException {
+		ComputerDetails details = new ComputerDetails();
+		String serverInfo = openHttpConnectionToString(baseUrl + "/serverinfo?uniqueid=" + uniqueId);
+		
+		details.name = getXmlString(serverInfo, "hostname").trim();
+		details.uuid = UUID.fromString(getXmlString(serverInfo, "uniqueid").trim());
+		details.macAddress = getXmlString(serverInfo, "mac");
+
+		// If there's no LocalIP field, use the address we hit the server on
+		String localIpStr = getXmlString(serverInfo, "LocalIP");
+		if (localIpStr == null) {
+			localIpStr = address.getHostAddress();
+		}
+		
+		// If there's no ExternalIP field, use the address we hit the server on
+		String externalIpStr = getXmlString(serverInfo, "ExternalIP");
+		if (externalIpStr == null) {
+			externalIpStr = address.getHostAddress();
+		}
+		
+		details.localIp = InetAddress.getByName(localIpStr.trim());
+		details.remoteIp = InetAddress.getByName(externalIpStr.trim());
+		
+		try {
+			details.pairState = Integer.parseInt(getXmlString(serverInfo, "PairStatus").trim()) == 1 ?
+					PairState.PAIRED : PairState.NOT_PAIRED;
+		} catch (NumberFormatException e) {
+			details.pairState = PairState.FAILED;
+		}
+		
+		try {
+			details.runningGameId = Integer.parseInt(getXmlString(serverInfo, "currentgame").trim());
+		} catch (NumberFormatException e) {
+			details.runningGameId = 0;
+		}
+		
+		// We could reach it so it's online
+		details.state = ComputerDetails.State.ONLINE;
+		
+		return details;
+	}
 
 	private InputStream openHttpConnection(String url) throws IOException {
 		URLConnection conn = new URL(url).openConnection();
@@ -140,12 +185,12 @@ public class NvHTTP {
 		return Integer.parseInt(game);
 	}
 	
-	public NvApp getSteamApp() throws IOException,
+	public NvApp getApp(String app) throws IOException,
 			XmlPullParserException {
 		LinkedList<NvApp> appList = getAppList();
-		for (NvApp app : appList) {
-			if (app.getAppName().equals("Steam")) {
-				return app;
+		for (NvApp appFromList : appList) {
+			if (appFromList.getAppName().equals(app)) {
+				return appFromList;
 			}
 		}
 		return null;
@@ -153,6 +198,11 @@ public class NvHTTP {
 	
 	public PairingManager.PairState pair(String pin) throws Exception {
 		return pm.pair(uniqueId, pin);
+	}
+	
+	public InputStream getBoxArtPng(NvApp app) throws IOException {
+		return openHttpConnection(baseUrl + "/applist?uniqueid="+uniqueId+"&appid="+
+				app.getAppId()+"&AssetType=2&AssetIdx=0");
 	}
 	
 	public LinkedList<NvApp> getAppList() throws GfeHttpResponseException, IOException, XmlPullParserException {
@@ -195,20 +245,38 @@ public class NvHTTP {
 		}
 		return appList;
 	}
+	
+	public void unpair() throws IOException {
+		openHttpConnection(baseUrl + "/unpair?uniqueid=" + uniqueId);
+	}
 
-	public int launchApp(int appId, int width, int height, int refreshRate, SecretKey inputKey) throws IOException, XmlPullParserException {
+	final private static char[] hexArray = "0123456789ABCDEF".toCharArray();
+	private static String bytesToHex(byte[] bytes) {
+	    char[] hexChars = new char[bytes.length * 2];
+	    for ( int j = 0; j < bytes.length; j++ ) {
+	        int v = bytes[j] & 0xFF;
+	        hexChars[j * 2] = hexArray[v >>> 4];
+	        hexChars[j * 2 + 1] = hexArray[v & 0x0F];
+	    }
+	    return new String(hexChars);
+	}
+	
+	public int launchApp(int appId, int width, int height, int refreshRate, SecretKey inputKey, boolean sops, int riKeyId) throws IOException, XmlPullParserException {
 		InputStream in = openHttpConnection(baseUrl +
 			"/launch?uniqueid=" + uniqueId +
 			"&appid=" + appId +
 			"&mode=" + width + "x" + height + "x" + refreshRate +
-			"&additionalStates=1&sops=1&rikey="+cryptoProvider.encodeBase64String(inputKey.getEncoded()));
+			"&additionalStates=1&sops=" + (sops ? 1 : 0) +
+			"&rikey="+bytesToHex(inputKey.getEncoded()) +
+			"&rikeyid="+riKeyId);
 		String gameSession = getXmlString(in, "gamesession");
 		return Integer.parseInt(gameSession);
 	}
 	
-	public boolean resumeApp(SecretKey inputKey) throws IOException, XmlPullParserException {
+	public boolean resumeApp(SecretKey inputKey, int riKeyId) throws IOException, XmlPullParserException {
 		InputStream in = openHttpConnection(baseUrl + "/resume?uniqueid=" + uniqueId +
-				"&rikey="+cryptoProvider.encodeBase64String(inputKey.getEncoded()));
+				"&rikey="+bytesToHex(inputKey.getEncoded()) +
+				"&rikeyid="+riKeyId);
 		String resume = getXmlString(in, "resume");
 		return Integer.parseInt(resume) != 0;
 	}

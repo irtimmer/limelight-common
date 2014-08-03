@@ -1,25 +1,28 @@
 package com.limelight.nvstream;
 
 public class StreamConfiguration {
+	private String app;
 	private int width, height;
 	private int refreshRate;
 	private int bitrate;
-	private int maxPacketSize;
+	private boolean sops;
 	
-	public StreamConfiguration(int width, int height, int refreshRate, int bitrate) {
+	public StreamConfiguration(String app, int width, int height, int refreshRate, int bitrate) {
+		this.app = app;
 		this.width = width;
 		this.height = height;
 		this.refreshRate = refreshRate;
 		this.bitrate = bitrate;
-		this.maxPacketSize = 1024;
+		this.sops = true;
 	}
 	
-	public StreamConfiguration(int width, int height, int refreshRate, int bitrate, int maxPacketSize) {
+	public StreamConfiguration(String app, int width, int height, int refreshRate, int bitrate, boolean sops) {
+		this.app = app;
 		this.width = width;
 		this.height = height;
 		this.refreshRate = refreshRate;
 		this.bitrate = bitrate;
-		this.maxPacketSize = maxPacketSize;
+		this.sops = sops;
 	}
 	
 	public int getWidth() {
@@ -39,6 +42,14 @@ public class StreamConfiguration {
 	}
 	
 	public int getMaxPacketSize() {
-		return maxPacketSize;
+		return 1024;
+	}
+
+	public String getApp() {
+		return app;
+	}
+	
+	public boolean getSops() {
+		return sops;
 	}
 }

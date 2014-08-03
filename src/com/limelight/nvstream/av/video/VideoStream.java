@@ -23,8 +23,6 @@ public class VideoStream {
 	public static final int FIRST_FRAME_TIMEOUT = 5000;
 	public static final int RTP_RECV_BUFFER = 64 * 1024;
 	
-	public static final int MAX_PACKET_SIZE = 1050;
-	
 	// The ring size MUST be greater than or equal to
 	// the maximum number of packets in a fully
 	// presentable frame
@@ -134,20 +132,27 @@ public class VideoStream {
 		rtp.bind(new InetSocketAddress(RTP_PORT));
 	}
 	
-	public void setupDecoderRenderer(VideoDecoderRenderer decRend, Object renderTarget, int drFlags) {
+	public boolean setupDecoderRenderer(VideoDecoderRenderer decRend, Object renderTarget, int drFlags) {
 		this.decRend = decRend;
 		if (decRend != null) {
-			decRend.setup(streamConfig.getWidth(), streamConfig.getHeight(),
-					60, renderTarget, drFlags);
-			
-			depacketizer = new VideoDepacketizer(avConnListener, streamConfig.getMaxPacketSize());
+			if (!decRend.setup(streamConfig.getWidth(), streamConfig.getHeight(),
+					60, renderTarget, drFlags)) {
+				return false;
+			}
 		}
+		
+		depacketizer = new VideoDepacketizer(avConnListener, streamConfig.getMaxPacketSize());
+		
+		return true;
 	}
 
-	public void startVideoStream(VideoDecoderRenderer decRend, Object renderTarget, int drFlags) throws IOException
+	public boolean startVideoStream(VideoDecoderRenderer decRend, Object renderTarget, int drFlags) throws IOException
 	{
 		// Setup the decoder and renderer
-		setupDecoderRenderer(decRend, renderTarget, drFlags);
+		if (!setupDecoderRenderer(decRend, renderTarget, drFlags)) {
+			// Nothing to cleanup here
+			return false;
+		}
 		
 		// Open RTP sockets and start session
 		setupRtpSession();
@@ -169,9 +174,14 @@ public class VideoStream {
 			startReceiveThread();
 			
 			// Start the renderer
-			decRend.start(depacketizer);
+			if (!decRend.start(depacketizer)) {
+				abort();
+				return false;
+			}
 			startedRendering = true;
 		}
+		
+		return true;
 	}
 	
 	private void startReceiveThread()
@@ -184,7 +194,7 @@ public class VideoStream {
 				int ringIndex = 0;
 				
 				// Preinitialize the ring buffer
-				int requiredBufferSize = streamConfig.getMaxPacketSize() + RtpPacket.HEADER_SIZE;
+				int requiredBufferSize = streamConfig.getMaxPacketSize() + RtpPacket.MAX_HEADER_SIZE;
 				for (int i = 0; i < VIDEO_RING_SIZE; i++) {
 					ring[i] = new VideoPacket(new byte[requiredBufferSize]);
 				}

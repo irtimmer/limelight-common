@@ -1,43 +1,48 @@
 package com.limelight.nvstream.av.video;
 
 import java.util.LinkedList;
-import java.util.concurrent.LinkedBlockingQueue;
 
 import com.limelight.LimeLog;
 import com.limelight.nvstream.av.ByteBufferDescriptor;
 import com.limelight.nvstream.av.DecodeUnit;
 import com.limelight.nvstream.av.ConnectionStatusListener;
+import com.limelight.nvstream.av.PopulatedBufferList;
 
 public class VideoDepacketizer {
 	
 	// Current frame state
 	private LinkedList<ByteBufferDescriptor> avcFrameDataChain = null;
 	private int avcFrameDataLength = 0;
-	private int currentlyDecoding = DecodeUnit.TYPE_UNKNOWN;
 	
 	// Sequencing state
 	private int lastPacketInStream = 0;
 	private int nextFrameNumber = 1;
-	private int nextPacketNumber;
 	private int startFrameNumber = 1;
 	private boolean waitingForNextSuccessfulFrame;
-	private boolean gotNextFrameStart;
+	private boolean waitingForIdrFrame = true;
 	private long frameStartTime;
+	private boolean decodingFrame;
 	
 	// Cached objects
 	private ByteBufferDescriptor cachedReassemblyDesc = new ByteBufferDescriptor(null, 0, 0);
 	private ByteBufferDescriptor cachedSpecialDesc = new ByteBufferDescriptor(null, 0, 0);
 	
 	private ConnectionStatusListener controlListener;
-	private int nominalPacketSize;
+	private final int nominalPacketDataLength;
 	
-	private static final int DU_LIMIT = 5;
-	private LinkedBlockingQueue<DecodeUnit> decodedUnits = new LinkedBlockingQueue<DecodeUnit>(DU_LIMIT);
+	private static final int DU_LIMIT = 30;
+	private PopulatedBufferList<DecodeUnit> decodedUnits;
 	
 	public VideoDepacketizer(ConnectionStatusListener controlListener, int nominalPacketSize)
 	{
 		this.controlListener = controlListener;
-		this.nominalPacketSize = nominalPacketSize;
+		this.nominalPacketDataLength = nominalPacketSize - VideoPacket.HEADER_SIZE;
+		
+		decodedUnits = new PopulatedBufferList<DecodeUnit>(DU_LIMIT, new PopulatedBufferList.BufferFactory() {
+			public Object createFreeBuffer() {
+				return new DecodeUnit();
+			}
+		});
 	}
 	
 	private void clearAvcFrameState()
@@ -50,22 +55,48 @@ public class VideoDepacketizer {
 	{
 		// This is the start of a new frame
 		if (avcFrameDataChain != null && avcFrameDataLength != 0) {
-			// Construct the H264 decode unit
-			DecodeUnit du = new DecodeUnit(DecodeUnit.TYPE_H264, avcFrameDataChain, avcFrameDataLength, frameNumber, frameStartTime);
-			if (!decodedUnits.offer(du)) {
-				LimeLog.warning("Video decoder is too slow! Forced to drop decode units");
-				
-				// Invalidate all frames from the start of the DU queue
-				controlListener.connectionSinkTooSlow(decodedUnits.remove().getFrameNumber(), frameNumber);
-				
-				// Remove existing frames
-				decodedUnits.clear();
-				
-				// Add this frame
-				decodedUnits.add(du);
+			ByteBufferDescriptor firstBuffer = avcFrameDataChain.getFirst();
+			
+			int flags = 0;
+			if (NAL.getSpecialSequenceDescriptor(firstBuffer, cachedSpecialDesc) && NAL.isAvcFrameStart(cachedSpecialDesc)) {
+				switch (cachedSpecialDesc.data[cachedSpecialDesc.offset+cachedSpecialDesc.length]) {
+				case 0x67:
+				case 0x68:
+					flags |= DecodeUnit.DU_FLAG_CODEC_CONFIG;
+					break;
+				case 0x65:
+					flags |= DecodeUnit.DU_FLAG_SYNC_FRAME;
+					break;
+				}
 			}
 			
+			// Construct the H264 decode unit
+			DecodeUnit du = decodedUnits.pollFreeObject();
+			if (du == null) {
+				LimeLog.warning("Video decoder is too slow! Forced to drop decode units");
+
+				// Invalidate all frames from the start of the DU queue
+				controlListener.connectionSinkTooSlow(0, 0);
+				
+				// Remove existing frames
+				decodedUnits.clearPopulatedObjects();
+				
+				// Try again
+				du = decodedUnits.pollFreeObject();
+				if (du == null) {
+					LimeLog.warning("Video decoder is leaking decode units!");
+					return;
+				}
+			}
+			
+			// Initialize the free DU
+			du.initialize(DecodeUnit.TYPE_H264, avcFrameDataChain,
+					avcFrameDataLength, frameNumber, frameStartTime, flags);
+			
 			controlListener.connectionReceivedFrame(frameNumber);
+			
+			// Submit the DU to the consumer
+			decodedUnits.addPopulatedObject(du);
 
 			// Clear old state
 			clearAvcFrameState();
@@ -74,6 +105,8 @@ public class VideoDepacketizer {
 	
 	private void addInputDataSlow(VideoPacket packet, ByteBufferDescriptor location)
 	{
+		boolean isDecodingH264 = false;
+		
 		while (location.length != 0)
 		{
 			// Remember the start of the NAL data in this packet
@@ -85,17 +118,25 @@ public class VideoDepacketizer {
 				if (NAL.isAvcStartSequence(cachedSpecialDesc))
 				{
 					// We're decoding H264 now
-					currentlyDecoding = DecodeUnit.TYPE_H264;
-
+					isDecodingH264 = true;
+					
 					// Check if it's the end of the last frame
 					if (NAL.isAvcFrameStart(cachedSpecialDesc))
 					{
+						// Update the global state that we're decoding a new frame
+						this.decodingFrame = true;
+						
 						// Reassemble any pending AVC NAL
 						reassembleAvcFrame(packet.getFrameIndex());
 
 						// Setup state for the new NAL
 						avcFrameDataChain = new LinkedList<ByteBufferDescriptor>();
 						avcFrameDataLength = 0;
+						
+						if (cachedSpecialDesc.data[cachedSpecialDesc.offset+cachedSpecialDesc.length] == 0x65) {
+							// This is the NALU code for I-frame data
+							waitingForIdrFrame = false;
+						}
 					}
 
 					// Skip the start sequence
@@ -105,14 +146,13 @@ public class VideoDepacketizer {
 				else
 				{
 					// Check if this is padding after a full AVC frame
-					if (currentlyDecoding == DecodeUnit.TYPE_H264 &&
-						NAL.isPadding(cachedSpecialDesc)) {
+					if (isDecodingH264 && NAL.isPadding(cachedSpecialDesc)) {
 						// The decode unit is complete
 						reassembleAvcFrame(packet.getFrameIndex());
 					}
 
 					// Not decoding AVC
-					currentlyDecoding = DecodeUnit.TYPE_UNKNOWN;
+					isDecodingH264 = false;
 
 					// Just skip this byte
 					location.length--;
@@ -131,8 +171,7 @@ public class VideoDepacketizer {
 					{
 						// Only stop if we're decoding something or this
 						// isn't padding
-						if (currentlyDecoding != DecodeUnit.TYPE_UNKNOWN ||
-							!NAL.isPadding(cachedSpecialDesc))
+						if (isDecodingH264 || !NAL.isPadding(cachedSpecialDesc))
 						{
 							break;
 						}
@@ -144,7 +183,7 @@ public class VideoDepacketizer {
 				location.length--;
 			}
 
-			if (currentlyDecoding == DecodeUnit.TYPE_H264 && avcFrameDataChain != null)
+			if (isDecodingH264 && avcFrameDataChain != null)
 			{
 				ByteBufferDescriptor data = new ByteBufferDescriptor(location.data, start, location.offset-start);
 
@@ -169,149 +208,156 @@ public class VideoDepacketizer {
 		avcFrameDataLength += location.length;
 	}
 	
+	private static boolean isFirstPacket(int flags) {
+		// Clear the picture data flag
+		flags &= ~VideoPacket.FLAG_CONTAINS_PIC_DATA;
+		
+		// Check if it's just the start or both start and end of a frame
+		return (flags == (VideoPacket.FLAG_SOF | VideoPacket.FLAG_EOF) ||
+			flags == VideoPacket.FLAG_SOF);
+	}
+	
 	public void addInputData(VideoPacket packet)
 	{
 		// Load our reassembly descriptor
 		packet.initializePayloadDescriptor(cachedReassemblyDesc);
 		
-		// Runt packets get decoded using the slow path
-		// These packets stand alone so there's no need to verify
-		// sequencing before submitting
-		if (cachedReassemblyDesc.length < nominalPacketSize - VideoPacket.HEADER_SIZE) {
-			addInputDataSlow(packet, cachedReassemblyDesc);
-            return;
-		}
+		int flags = packet.getFlags();
 		
 		int frameIndex = packet.getFrameIndex();
-		int packetIndex = packet.getPacketIndex();
-		int packetsInFrame = packet.getTotalPackets();
+		boolean firstPacket = isFirstPacket(flags);
 		
-		// We can use FEC to correct single packet errors
-		// on single packet frames because we just get a
-		// duplicate of the original packet
-		if (packetsInFrame == 1 && packetIndex == 1 &&
-			nextPacketNumber == 0 && frameIndex == nextFrameNumber) {
-			LimeLog.info("Using FEC for error correction");
-			nextPacketNumber = 1;
-		}
-		// Discard the rest of the FEC data until we know how to use it
-		else if (packetIndex >= packetsInFrame) {
+		// Drop duplicates or re-ordered packets
+		int streamPacketIndex = packet.getStreamPacketIndex();
+		if (streamPacketIndex < (int)(lastPacketInStream + 1)) {
 			return;
 		}
 		
-		// Check that this is the next frame
-		boolean firstPacket = (packet.getFlags() & VideoPacket.FLAG_SOF) != 0;
-		if (frameIndex > nextFrameNumber) {
-			// Nope, but we can still work with it if it's
-			// the start of the next frame
-			if (firstPacket) {
-				LimeLog.warning("Got start of frame "+frameIndex+
-						" when expecting packet "+nextPacketNumber+
-						" of frame "+nextFrameNumber);
-				nextFrameNumber = frameIndex;
-				nextPacketNumber = 0;
-				clearAvcFrameState();
+		// Drop packets from a previously completed frame
+		if (frameIndex < nextFrameNumber) {
+			return;
+		}
+		
+		// Look for a frame start before receiving a frame end
+		if (firstPacket && decodingFrame)
+		{
+			LimeLog.warning("Network dropped end of a frame");
+			nextFrameNumber = frameIndex;
+			
+			// Unexpected start of next frame before terminating the last
+			waitingForNextSuccessfulFrame = true;
+			waitingForIdrFrame = true;
+			
+			// Clear the old state and wait for an IDR
+			clearAvcFrameState();
+			decodingFrame = true;
+		}
+		// Look for a non-frame start before a frame start
+		else if (!firstPacket && !decodingFrame) {
+			// Check if this looks like a real frame
+			if (flags == VideoPacket.FLAG_CONTAINS_PIC_DATA ||
+				flags == VideoPacket.FLAG_EOF ||
+				cachedReassemblyDesc.length < nominalPacketDataLength)
+			{
+				LimeLog.warning("Network dropped beginning of a frame");
+				nextFrameNumber = frameIndex + 1;
 				
-				// Tell the encoder when we're done decoding this frame
-				// that we lost some previous frames
 				waitingForNextSuccessfulFrame = true;
-				gotNextFrameStart = false;
+				waitingForIdrFrame = true;
+				
+				clearAvcFrameState();
+				decodingFrame = false;
+				return;
 			}
 			else {
-				LimeLog.warning("Got packet "+packetIndex+" of frame "+frameIndex+
-						" when expecting packet "+nextPacketNumber+
-						" of frame "+nextFrameNumber);
-				// We dropped the start of this frame too
-				waitingForNextSuccessfulFrame = true;
-				gotNextFrameStart = false;
-				
-				// Try to pickup on the next frame
-				nextFrameNumber = frameIndex + 1;
-				nextPacketNumber = 0;
-				clearAvcFrameState();
+				// FEC data
 				return;
 			}
 		}
-		else if (frameIndex < nextFrameNumber) {
-			LimeLog.info("Frame "+frameIndex+" is behind our current frame number "+nextFrameNumber);
-			// Discard the frame silently if it's behind our current sequence number
-			return;
-		}
-		
-		// We know it's the right frame, now check the packet number
-		if (packetIndex != nextPacketNumber) {
-			LimeLog.warning("Frame "+frameIndex+": expected packet "+nextPacketNumber+" but got "+packetIndex);
-			// At this point, we're guaranteed that it's not FEC data that we lost
-			waitingForNextSuccessfulFrame = true;
-			gotNextFrameStart = false;
+		// Check sequencing of this frame to ensure we didn't
+		// miss one in between
+		else if (firstPacket) {
+			// Make sure this is the next consecutive frame
+			if (nextFrameNumber < frameIndex) {
+				LimeLog.warning("Network dropped an entire frame");
+				nextFrameNumber = frameIndex;
+				
+				// Wait until an IDR frame comes
+				waitingForNextSuccessfulFrame = true;
+				waitingForIdrFrame = true;
+				clearAvcFrameState();
+			}
+			else if (nextFrameNumber > frameIndex){
+				// Duplicate packet or FEC dup
+				decodingFrame = false;
+				return;
+			}
 			
-			// Skip this frame
-			nextFrameNumber++;
-			nextPacketNumber = 0;
-			clearAvcFrameState();
-			return;
+			// We're now decoding a frame
+			decodingFrame = true;
 		}
 		
-		if (waitingForNextSuccessfulFrame) {
-			if (!gotNextFrameStart) {
-				if (!firstPacket) {
-					// We're waiting for the next frame, but this one is a fragment of a frame
-					// so we must discard it and wait for the next one
-					LimeLog.warning("Expected start of frame "+frameIndex);
-					
-					nextFrameNumber = frameIndex + 1;
-					nextPacketNumber = 0;
-					clearAvcFrameState();
-					return;
-				}
-				else {
-					gotNextFrameStart = true;
-				}
+		// If it's not the first packet of a frame
+		// we need to drop it if the stream packet index
+		// doesn't match
+		if (!firstPacket && decodingFrame) {
+			if (streamPacketIndex != (int)(lastPacketInStream + 1)) {
+				LimeLog.warning("Network dropped middle of a frame");
+				nextFrameNumber = frameIndex + 1;
+				
+				waitingForNextSuccessfulFrame = true;
+				waitingForIdrFrame = true;
+				
+				clearAvcFrameState();
+				decodingFrame = false;
+				
+				return;
 			}
 		}
 		
-		int streamPacketIndex = packet.getStreamPacketIndex();
+		// Notify the server of any packet losses
 		if (streamPacketIndex != (int)(lastPacketInStream + 1)) {
 			// Packets were lost so report this to the server
 			controlListener.connectionLostPackets(lastPacketInStream, streamPacketIndex);
 		}
 		lastPacketInStream = streamPacketIndex;
 		
-		nextPacketNumber++;
-		
-		// Remove extra padding
-		cachedReassemblyDesc.length = packet.getPayloadLength();
-		
-		if (firstPacket)
-		{
-			if (NAL.getSpecialSequenceDescriptor(cachedReassemblyDesc, cachedSpecialDesc)
+		if (firstPacket
+				&& NAL.getSpecialSequenceDescriptor(cachedReassemblyDesc, cachedSpecialDesc)
 				&& NAL.isAvcFrameStart(cachedSpecialDesc)
 				&& cachedSpecialDesc.data[cachedSpecialDesc.offset+cachedSpecialDesc.length] == 0x67)
-			{
-				// SPS and PPS prefix is padded between NALs, so we must decode it with the slow path
-				clearAvcFrameState();
-				addInputDataSlow(packet, cachedReassemblyDesc);
-				return;
-			}
+		{
+			// SPS and PPS prefix is padded between NALs, so we must decode it with the slow path
+			addInputDataSlow(packet, cachedReassemblyDesc);
 		}
-
-		addInputDataFast(packet, cachedReassemblyDesc, firstPacket);
-		
-		// We can't use the EOF flag here because real frames can be split across
-		// multiple "frames" when packetized to fit under the bandwidth ceiling
-		if (packetIndex + 1 >= packetsInFrame) {
-	        nextFrameNumber++;
-	        nextPacketNumber = 0;
+		else
+		{	
+			// Everything else can take the fast path
+			addInputDataFast(packet, cachedReassemblyDesc, firstPacket);
 		}
 		
-		if ((packet.getFlags() & VideoPacket.FLAG_EOF) != 0) {
-	        reassembleAvcFrame(packet.getFrameIndex());
+		if ((flags & VideoPacket.FLAG_EOF) != 0) {
+	        // Move on to the next frame
+	        decodingFrame = false;
+	        nextFrameNumber = frameIndex + 1;
 			
+			// If waiting for next successful frame and we got here
+			// with an end flag, we can send a message to the server
 			if (waitingForNextSuccessfulFrame) {
 				// This is the next successful frame after a loss event
 				controlListener.connectionDetectedFrameLoss(startFrameNumber, nextFrameNumber - 1);
 				waitingForNextSuccessfulFrame = false;
 			}
+			
+			// If we need an IDR frame first, then drop this frame
+			if (waitingForIdrFrame) {
+				LimeLog.warning("Waiting for IDR frame");
+				
+				clearAvcFrameState();
+				return;
+			}
+			
+	        reassembleAvcFrame(frameIndex);
 			
 	        startFrameNumber = nextFrameNumber;
 		}
@@ -319,12 +365,17 @@ public class VideoDepacketizer {
 	
 	public DecodeUnit takeNextDecodeUnit() throws InterruptedException
 	{
-		return decodedUnits.take();
+		return decodedUnits.takePopulatedObject();
 	}
 	
 	public DecodeUnit pollNextDecodeUnit()
 	{
-		return decodedUnits.poll();
+		return decodedUnits.pollPopulatedObject();
+	}
+	
+	public void freeDecodeUnit(DecodeUnit du)
+	{
+		decodedUnits.freePopulatedObject(du);
 	}
 }
 
