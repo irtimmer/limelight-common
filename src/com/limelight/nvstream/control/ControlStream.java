@@ -80,7 +80,7 @@ public class ControlStream implements ConnectionStatusListener {
 	
 	private void sendPacket(NvCtlPacket packet) throws IOException
 	{
-		out.write(packet.toWire());
+		packet.write(out);
 		out.flush();
 	}
 	
@@ -90,10 +90,9 @@ public class ControlStream implements ConnectionStatusListener {
 		return new NvCtlResponse(in);
 	}
 	
-	private void sendLossStats() throws IOException
+	private void sendLossStats(ByteBuffer bb) throws IOException
 	{
-		ByteBuffer bb = ByteBuffer.allocate(PPAYLEN_LOSS_STATS).order(ByteOrder.LITTLE_ENDIAN);
-		
+		bb.rewind();
 		bb.putInt(lossCountSinceLastReport); // Packet loss count
 		bb.putInt(LOSS_REPORT_INTERVAL_MS); // Time since last report in milliseconds
 		bb.putInt(1000);
@@ -148,10 +147,12 @@ public class ControlStream implements ConnectionStatusListener {
 		lossStatsThread = new Thread() {
 			@Override
 			public void run() {
+				ByteBuffer bb = ByteBuffer.allocate(PPAYLEN_LOSS_STATS).order(ByteOrder.LITTLE_ENDIAN);
+				
 				while (!isInterrupted())
-				{
+				{	
 					try {
-						sendLossStats();
+						sendLossStats(bb);
 						lossCountSinceLastReport = 0;
 					} catch (IOException e) {
 						listener.connectionTerminated(e);
@@ -250,39 +251,42 @@ public class ControlStream implements ConnectionStatusListener {
 		sendAndGetReply(new NvCtlPacket(PTYPE_RESYNC, PPAYLEN_RESYNC, conf.array()));
 	}
 	
-	class NvCtlPacket {
+	static class NvCtlPacket {
 		public short type;
 		public short paylen;
 		public byte[] payload;
 		
+		private static final ByteBuffer headerBuffer = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
+		
 		public NvCtlPacket(InputStream in) throws IOException
 		{
-			byte[] header = new byte[4];
-			
-			int offset = 0;
-			do
-			{
-				int bytesRead = in.read(header, offset, header.length - offset);
-				if (bytesRead < 0) {
-					break;
+			// Use the class's static header buffer for parsing the header
+			synchronized (headerBuffer) {
+				int offset = 0;
+				byte[] header = headerBuffer.array();
+				do
+				{
+					int bytesRead = in.read(header, offset, header.length - offset);
+					if (bytesRead < 0) {
+						break;
+					}
+					offset += bytesRead;
+				} while (offset != header.length);
+
+				if (offset != header.length) {
+					throw new IOException("Socket closed prematurely");
 				}
-				offset += bytesRead;
-			} while (offset != header.length);
-			
-			if (offset != header.length) {
-				throw new IOException("Socket closed prematurely");
+
+				headerBuffer.rewind();
+				type = headerBuffer.getShort();
+				paylen = headerBuffer.getShort();
 			}
-			
-			ByteBuffer bb = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN);
-			
-			type = bb.getShort();
-			paylen = bb.getShort();
-			
+
 			if (paylen != 0)
 			{
 				payload = new byte[paylen];
-
-				offset = 0;
+				
+				int offset = 0;
 				do
 				{
 					int bytesRead = in.read(payload, offset, payload.length - offset);
@@ -298,17 +302,22 @@ public class ControlStream implements ConnectionStatusListener {
 			}
 		}
 		
-		public NvCtlPacket(byte[] payload)
+		public NvCtlPacket(byte[] packet)
 		{
-			ByteBuffer bb = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
+			synchronized (headerBuffer) {
+				headerBuffer.rewind();
+
+				headerBuffer.put(packet, 0, 4);
+				headerBuffer.rewind();
+				
+				type = headerBuffer.getShort();
+				paylen = headerBuffer.getShort();
+			}
 			
-			type = bb.getShort();
-			paylen = bb.getShort();
-			
-			if (bb.hasRemaining())
+			if (paylen != 0)
 			{
-				payload = new byte[bb.remaining()];
-				bb.get(payload);
+				payload = new byte[paylen];
+				System.arraycopy(packet, 4, payload, 0, paylen);
 			}
 		}
 		
@@ -345,17 +354,17 @@ public class ControlStream implements ConnectionStatusListener {
 			this.paylen = paylen;
 		}
 		
-		public byte[] toWire()
+		public void write(OutputStream out) throws IOException
 		{
-			ByteBuffer bb = ByteBuffer.allocate(4 + (payload != null ? payload.length : 0)).order(ByteOrder.LITTLE_ENDIAN);
+			// Use the class's header buffer to construct the wireform to send
+			synchronized (headerBuffer) {
+				headerBuffer.rewind();
+				headerBuffer.putShort(type);
+				headerBuffer.putShort(paylen);
+				out.write(headerBuffer.array());
+			}
 			
-			bb.putShort(type);
-			bb.putShort(paylen);
-			
-			if (payload != null)
-				bb.put(payload);
-			
-			return bb.array();
+			out.write(payload);
 		}
 	}
 	
@@ -398,6 +407,14 @@ public class ControlStream implements ConnectionStatusListener {
 	}
 
 	public void connectionDetectedFrameLoss(int firstLostFrame, int nextSuccessfulFrame) {
+		resyncConnection(firstLostFrame, nextSuccessfulFrame);
+		
+		// Suppress connection warnings for the first 150 frames to allow the connection
+		// to stabilize
+		if (currentFrame < 150) {
+			return;
+		}
+		
 		if (System.currentTimeMillis() > LOSS_PERIOD_MS + lossTimestamp) {
 			lossCount++;
 			lossTimestamp = System.currentTimeMillis();
@@ -411,17 +428,21 @@ public class ControlStream implements ConnectionStatusListener {
 				lossTimestamp = 0;
 			}
 		}
-		
-		resyncConnection(firstLostFrame, nextSuccessfulFrame);
 	}
 
 	public void connectionSinkTooSlow(int firstLostFrame, int nextSuccessfulFrame) {
+		resyncConnection(firstLostFrame, nextSuccessfulFrame);
+		
+		// Suppress connection warnings for the first 150 frames to allow the connection
+		// to stabilize
+		if (currentFrame < 150) {
+			return;
+		}
+		
 		if (++slowSinkCount == MAX_SLOW_SINK_COUNT) {
 			listener.displayTransientMessage("Your device is processing the A/V data too slowly. Try lowering stream resolution and/or frame rate.");
 			slowSinkCount = -MAX_SLOW_SINK_COUNT * MESSAGE_DELAY_FACTOR;
 		}
-		
-		resyncConnection(firstLostFrame, nextSuccessfulFrame);
 	}
 
 	public void connectionReceivedFrame(int frameIndex) {
