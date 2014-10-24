@@ -90,10 +90,8 @@ public class AudioStream {
 	
 	private void setupRtpSession() throws SocketException
 	{
-		rtp = new DatagramSocket(null);
-		rtp.setReuseAddress(true);
+		rtp = new DatagramSocket();
 		rtp.setReceiveBufferSize(RTP_RECV_BUFFER);
-		rtp.bind(new InetSocketAddress(RTP_PORT));
 	}
 	
 	private boolean setupAudio()
@@ -144,6 +142,7 @@ public class AudioStream {
 		};
 		threads.add(t);
 		t.setName("Audio - Player");
+		t.setPriority(Thread.NORM_PRIORITY + 2);
 		t.start();
 	}
 	
@@ -207,7 +206,7 @@ public class AudioStream {
 		};
 		threads.add(t);
 		t.setName("Audio - Receive");
-		t.setPriority(Thread.MAX_PRIORITY);
+		t.setPriority(Thread.NORM_PRIORITY + 1);
 		t.start();
 	}
 	

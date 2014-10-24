@@ -19,6 +19,7 @@ import java.net.Socket;
 import java.security.*;
 import java.security.cert.*;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.Random;
 
 public class PairingManager {
@@ -214,7 +215,7 @@ public class PairingManager {
 	
 	public static String generatePinString() {
 		Random r = new Random();
-		return String.format("%d%d%d%d",
+		return String.format((Locale)null, "%d%d%d%d",
 				r.nextInt(10), r.nextInt(10),
 				r.nextInt(10), r.nextInt(10));
 	}
@@ -235,11 +236,14 @@ public class PairingManager {
 		byte[] saltAndPin = saltPin(salt, pin);
 		aesKey = generateAesKey(saltAndPin);
 		
-		// Send the salt and get the server cert
+		// Send the salt and get the server cert. This doesn't have a read timeout
+		// because the user must enter the PIN before the server responds
 		String getCert = http.openHttpConnectionToString(http.baseUrl +
-				"/pair?uniqueid="+uniqueId+"&devicename=roth&updateState=1&phrase=getservercert&salt="+bytesToHex(salt)+"&clientcert="+bytesToHex(pemCertBytes));
+				"/pair?uniqueid="+uniqueId+"&devicename=roth&updateState=1&phrase=getservercert&salt="+
+				bytesToHex(salt)+"&clientcert="+bytesToHex(pemCertBytes),
+				false);
 		if (!NvHTTP.getXmlString(getCert, "paired").equals("1")) {
-			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId);
+			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId, true);
 			return PairState.FAILED;
 		}
 		X509Certificate serverCert = extractPlainCert(getCert);
@@ -250,9 +254,10 @@ public class PairingManager {
 		
 		// Send the encrypted challenge to the server
 		String challengeResp = http.openHttpConnectionToString(http.baseUrl + 
-				"/pair?uniqueid="+uniqueId+"&devicename=roth&updateState=1&clientchallenge="+bytesToHex(encryptedChallenge));
+				"/pair?uniqueid="+uniqueId+"&devicename=roth&updateState=1&clientchallenge="+bytesToHex(encryptedChallenge),
+				true);
 		if (!NvHTTP.getXmlString(challengeResp, "paired").equals("1")) {
-			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId);
+			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId, true);
 			return PairState.FAILED;
 		}
 		
@@ -268,9 +273,10 @@ public class PairingManager {
 		byte[] challengeRespHash = toSHA1Bytes(concatBytes(concatBytes(serverChallenge, cert.getSignature()), clientSecret));
 		byte[] challengeRespEncrypted = encryptAes(challengeRespHash, aesKey);
 		String secretResp = http.openHttpConnectionToString(http.baseUrl +
-				"/pair?uniqueid="+uniqueId+"&devicename=roth&updateState=1&serverchallengeresp="+bytesToHex(challengeRespEncrypted));
+				"/pair?uniqueid="+uniqueId+"&devicename=roth&updateState=1&serverchallengeresp="+bytesToHex(challengeRespEncrypted),
+				true);
 		if (!NvHTTP.getXmlString(secretResp, "paired").equals("1")) {
-			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId);
+			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId, true);
 			return PairState.FAILED;
 		}
 		
@@ -282,7 +288,7 @@ public class PairingManager {
 		// Ensure the authenticity of the data
 		if (!verifySignature(serverSecret, serverSignature, serverCert)) {
 			// Cancel the pairing process
-			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId);
+			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId, true);
 			
 			// Looks like a MITM
 			return PairState.FAILED;
@@ -292,7 +298,7 @@ public class PairingManager {
 		byte[] serverChallengeRespHash = toSHA1Bytes(concatBytes(concatBytes(randomChallenge, serverCert.getSignature()), serverSecret));
 		if (!Arrays.equals(serverChallengeRespHash, serverResponse)) {
 			// Cancel the pairing process
-			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId);
+			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId, true);
 			
 			// Probably got the wrong PIN
 			return PairState.PIN_WRONG;
@@ -301,16 +307,18 @@ public class PairingManager {
 		// Send the server our signed secret
 		byte[] clientPairingSecret = concatBytes(clientSecret, signData(clientSecret, pk));
 		String clientSecretResp = http.openHttpConnectionToString(http.baseUrl + 
-				"/pair?uniqueid="+uniqueId+"&devicename=roth&updateState=1&clientpairingsecret="+bytesToHex(clientPairingSecret));
+				"/pair?uniqueid="+uniqueId+"&devicename=roth&updateState=1&clientpairingsecret="+bytesToHex(clientPairingSecret),
+				true);
 		if (!NvHTTP.getXmlString(clientSecretResp, "paired").equals("1")) {
-			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId);
+			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId, true);
 			return PairState.FAILED;
 		}
 		
 		// Do the initial challenge (seems neccessary for us to show as paired)
-		String pairChallenge = http.openHttpConnectionToString(http.baseUrl + "/pair?uniqueid="+uniqueId+"&devicename=roth&updateState=1&phrase=pairchallenge");
+		String pairChallenge = http.openHttpConnectionToString(http.baseUrl +
+				"/pair?uniqueid="+uniqueId+"&devicename=roth&updateState=1&phrase=pairchallenge", true);
 		if (!NvHTTP.getXmlString(pairChallenge, "paired").equals("1")) {
-			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId);
+			http.openHttpConnectionToString(http.baseUrl + "/unpair?uniqueid="+uniqueId, true);
 			return PairState.FAILED;
 		}
 		
