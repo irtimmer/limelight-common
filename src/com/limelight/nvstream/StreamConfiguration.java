@@ -7,25 +7,68 @@ public class StreamConfiguration {
 	private int bitrate;
 	private boolean sops;
 	private boolean enableAdaptiveResolution;
+	private boolean playLocalAudio;
+	private int maxPacketSize;
 	
-	public StreamConfiguration(String app, int width, int height, int refreshRate, int bitrate) {
-		this.app = app;
-		this.width = width;
-		this.height = height;
-		this.refreshRate = refreshRate;
-		this.bitrate = bitrate;
-		this.sops = true;
+	public static class Builder {
+		private StreamConfiguration config = new StreamConfiguration();
+		
+		public StreamConfiguration.Builder setApp(String app) {
+			config.app = app;
+			return this;
+		}
+		
+		public StreamConfiguration.Builder setResolution(int width, int height) {
+			config.width = width;
+			config.height = height;
+			return this;
+		}
+		
+		public StreamConfiguration.Builder setRefreshRate(int refreshRate) {
+			config.refreshRate = refreshRate;
+			return this;
+		}
+		
+		public StreamConfiguration.Builder setBitrate(int bitrate) {
+			config.bitrate = bitrate;
+			return this;
+		}
+		
+		public StreamConfiguration.Builder setEnableSops(boolean enable) {
+			config.sops = enable;
+			return this;
+		}
+		
+		public StreamConfiguration.Builder enableAdaptiveResolution(boolean enable) {
+			config.enableAdaptiveResolution = enable;
+			return this;
+		}
+		
+		public StreamConfiguration.Builder enableLocalAudioPlayback(boolean enable) {
+			config.playLocalAudio = enable;
+			return this;
+		}
+		
+		public StreamConfiguration.Builder setMaxPacketSize(int maxPacketSize) {
+			config.maxPacketSize = maxPacketSize;
+			return this;
+		}
+		
+		public StreamConfiguration build() {
+			return config;
+		}
 	}
 	
-	public StreamConfiguration(String app, int width, int height, int refreshRate, int bitrate, boolean sops,
-			boolean enableAdaptiveResolution) {
-		this.app = app;
-		this.width = width;
-		this.height = height;
-		this.refreshRate = refreshRate;
-		this.bitrate = bitrate;
-		this.sops = sops;
-		this.enableAdaptiveResolution = enableAdaptiveResolution;
+	private StreamConfiguration() {
+		// Set default attributes
+		this.app = "Steam";
+		this.width = 1280;
+		this.height = 720;
+		this.refreshRate = 60;
+		this.bitrate = 10000;
+		this.maxPacketSize = 1024;
+		this.sops = true;
+		this.enableAdaptiveResolution = false;
 	}
 	
 	public int getWidth() {
@@ -45,7 +88,7 @@ public class StreamConfiguration {
 	}
 	
 	public int getMaxPacketSize() {
-		return 1024;
+		return maxPacketSize;
 	}
 
 	public String getApp() {
@@ -58,5 +101,9 @@ public class StreamConfiguration {
 	
 	public boolean getAdaptiveResolutionEnabled() {
 		return enableAdaptiveResolution;
+	}
+	
+	public boolean getPlayLocalAudio() {
+		return playLocalAudio;
 	}
 }
