@@ -25,6 +25,11 @@ public class VideoStream {
 	public static final int FIRST_FRAME_TIMEOUT = 5000;
 	public static final int RTP_RECV_BUFFER = 64 * 1024;
 	
+	// We can't request an IDR frame until the depacketizer knows
+	// that a packet was lost. This timeout bounds the time that
+	// the RTP queue will wait for missing/reordered packets.
+	public static final int MAX_RTP_QUEUE_DELAY_MS = 10;
+	
 	// The ring size MUST be greater than or equal to
 	// the maximum number of packets in a fully
 	// presentable frame
@@ -84,26 +89,29 @@ public class VideoStream {
 			} catch (InterruptedException e) { }
 		}
 		
-		if (startedRendering) {
-			decRend.stop();
-		}
-		
 		if (decRend != null) {
+			if (startedRendering) {
+				decRend.stop();
+			}
+			
 			decRend.release();
 		}
 		
 		threads.clear();
+	}
+	
+	private void connectFirstFrame() throws IOException
+	{
+		firstFrameSocket = new Socket();
+		firstFrameSocket.setSoTimeout(FIRST_FRAME_TIMEOUT);
+		firstFrameSocket.connect(new InetSocketAddress(host, FIRST_FRAME_PORT), FIRST_FRAME_TIMEOUT);
 	}
 
 	private void readFirstFrame() throws IOException
 	{
 		byte[] firstFrame = new byte[streamConfig.getMaxPacketSize()];
 		
-		firstFrameSocket = new Socket();
-		firstFrameSocket.setSoTimeout(FIRST_FRAME_TIMEOUT);
-		
 		try {
-			firstFrameSocket.connect(new InetSocketAddress(host, FIRST_FRAME_PORT), FIRST_FRAME_TIMEOUT);
 			InputStream firstFrameStream = firstFrameSocket.getInputStream();
 			
 			int offset = 0;
@@ -117,9 +125,9 @@ public class VideoStream {
 				offset += bytesRead;
 			}
 			
-			VideoPacket packet = new VideoPacket(firstFrame);
-			packet.initializeWithLengthNoRtpHeader(offset);
-			depacketizer.addInputData(packet);
+			// We can actually ignore this data. It's the act of reading it that matters.
+			// If this changes, we'll need to move this call before startReceiveThread()
+			// to avoid state corruption in the depacketizer
 		} finally {
 			firstFrameSocket.close();
 			firstFrameSocket = null;
@@ -134,14 +142,27 @@ public class VideoStream {
 	
 	public boolean setupDecoderRenderer(VideoDecoderRenderer decRend, Object renderTarget, int drFlags) {
 		this.decRend = decRend;
+		
+		depacketizer = new VideoDepacketizer(avConnListener, streamConfig.getMaxPacketSize());
+		
 		if (decRend != null) {
-			if (!decRend.setup(streamConfig.getWidth(), streamConfig.getHeight(),
-					60, renderTarget, drFlags)) {
+			try {
+				if (!decRend.setup(streamConfig.getWidth(), streamConfig.getHeight(),
+						60, renderTarget, drFlags)) {
+					return false;
+				}
+				
+				if (!decRend.start(depacketizer)) {
+					abort();
+					return false;
+				}
+				
+				startedRendering = true;
+			} catch (Exception e) {
+				e.printStackTrace();
 				return false;
 			}
 		}
-		
-		depacketizer = new VideoDepacketizer(avConnListener, streamConfig.getMaxPacketSize());
 		
 		return true;
 	}
@@ -154,32 +175,24 @@ public class VideoStream {
 			throw new IOException("Video decoder failed to initialize. Please restart your device and try again.");
 		}
 		
-		// Start the renderer
-		if (!decRend.start(depacketizer)) {
-			abort();
-			return false;
-		}
-		startedRendering = true;
-		
 		// Open RTP sockets and start session
 		setupRtpSession();
 		
-		// Start pinging before reading the first frame
-		// so Shield Proxy knows we're here and sends us
-		// the reference frame
-		startUdpPingThread();
-		
-		// Read the first frame to start the UDP video stream
-		// This MUST be called before the normal UDP receive thread
-		// starts in order to avoid state corruption caused by two
-		// threads simultaneously adding input data.
-		readFirstFrame();
-		
 		if (decRend != null) {
 			// Start the receive thread early to avoid missing
-			// early packets
+			// early packets that are part of the IDR frame
 			startReceiveThread();
 		}
+		
+		// Connect to the first frame port to open UDP 47998
+		connectFirstFrame();
+		
+		// Start pinging before reading the first frame
+		// so GFE knows where to send UDP data
+		startUdpPingThread();
+		
+		// Read the first frame to start the flow of video
+		readFirstFrame();
 		
 		return true;
 	}
@@ -193,7 +206,7 @@ public class VideoStream {
 				VideoPacket ring[] = new VideoPacket[VIDEO_RING_SIZE];
 				VideoPacket queuedPacket;
 				int ringIndex = 0;
-				RtpReorderQueue rtpQueue = new RtpReorderQueue();
+				RtpReorderQueue rtpQueue = new RtpReorderQueue(16, MAX_RTP_QUEUE_DELAY_MS);
 				RtpReorderQueue.RtpQueueStatus queueStatus;
 				
 				// Preinitialize the ring buffer
