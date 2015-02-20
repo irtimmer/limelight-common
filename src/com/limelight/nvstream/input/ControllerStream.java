@@ -2,7 +2,6 @@ package com.limelight.nvstream.input;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
@@ -15,22 +14,21 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 import javax.crypto.Cipher;
 import javax.crypto.NoSuchPaddingException;
-import javax.crypto.SecretKey;
 import javax.crypto.spec.IvParameterSpec;
 
-import com.limelight.nvstream.NvConnectionListener;
+import com.limelight.nvstream.ConnectionContext;
 
 public class ControllerStream {
 	
-	public final static int PORT = 35043;
+	private final static int PORT = 35043;
 	
-	public final static int CONTROLLER_TIMEOUT = 3000;
+	private final static int CONTROLLER_TIMEOUT = 3000;
 	
-	private InetAddress host;
+	private ConnectionContext context;
+	
 	private Socket s;
 	private OutputStream out;
 	private Cipher riCipher;
-	private NvConnectionListener listener;
 	
 	private Thread inputThread;
 	private LinkedBlockingQueue<InputPacket> inputQueue = new LinkedBlockingQueue<InputPacket>();
@@ -38,18 +36,17 @@ public class ControllerStream {
 	private ByteBuffer stagingBuffer = ByteBuffer.allocate(128);
 	private ByteBuffer sendBuffer = ByteBuffer.allocate(128).order(ByteOrder.BIG_ENDIAN);
 	
-	public ControllerStream(InetAddress host, SecretKey riKey, int riKeyId, NvConnectionListener listener)
+	public ControllerStream(ConnectionContext context)
 	{
-		this.host = host;
-		this.listener = listener;
+		this.context = context;
 		try {
 			// This cipher is guaranteed to be supported
 			this.riCipher = Cipher.getInstance("AES/CBC/NoPadding");
 			
 			ByteBuffer bb = ByteBuffer.allocate(16);
-			bb.putInt(riKeyId);
+			bb.putInt(context.riKeyId);
 			
-			this.riCipher.init(Cipher.ENCRYPT_MODE, riKey, new IvParameterSpec(bb.array()));
+			this.riCipher.init(Cipher.ENCRYPT_MODE, context.riKey, new IvParameterSpec(bb.array()));
 		} catch (NoSuchAlgorithmException e) {
 			e.printStackTrace();
 		} catch (NoSuchPaddingException e) {
@@ -64,7 +61,7 @@ public class ControllerStream {
 	public void initialize() throws IOException
 	{
 		s = new Socket();
-		s.connect(new InetSocketAddress(host, PORT), CONTROLLER_TIMEOUT);
+		s.connect(new InetSocketAddress(context.serverAddress, PORT), CONTROLLER_TIMEOUT);
 		s.setTcpNoDelay(true);
 		out = s.getOutputStream();
 	}
@@ -80,7 +77,7 @@ public class ControllerStream {
 					try {
 						packet = inputQueue.take();
 					} catch (InterruptedException e) {
-						listener.connectionTerminated(e);
+						context.connListener.connectionTerminated(e);
 						return;
 					}
 					
@@ -123,7 +120,7 @@ public class ControllerStream {
 							try {
 								sendPacket(initialMouseMove);
 							} catch (IOException e) {
-								listener.connectionTerminated(e);
+								context.connListener.connectionTerminated(e);
 								return;
 							}
 							
@@ -132,8 +129,8 @@ public class ControllerStream {
 						} while (totalDeltaX != 0 && totalDeltaY != 0);
 					}
 					// Try to batch axis changes on controller packets too
-					else if (!inputQueue.isEmpty() && packet instanceof ControllerPacket) {
-						ControllerPacket initialControllerPacket = (ControllerPacket) packet;
+					else if (!inputQueue.isEmpty() && packet instanceof MultiControllerPacket) {
+						MultiControllerPacket initialControllerPacket = (MultiControllerPacket) packet;
 						ControllerBatchingBlock batchingBlock = null;
 						
 						synchronized (inputQueue) {
@@ -141,13 +138,13 @@ public class ControllerStream {
 							while (i.hasNext()) {
 								InputPacket queuedPacket = i.next();
 								
-								if (queuedPacket instanceof ControllerPacket) {
+								if (queuedPacket instanceof MultiControllerPacket) {
 									// Only initialize the batching block if we got here
 									if (batchingBlock == null) {
 										batchingBlock = new ControllerBatchingBlock(initialControllerPacket);
 									}
 									
-									if (batchingBlock.submitNewPacket((ControllerPacket) queuedPacket))
+									if (batchingBlock.submitNewPacket((MultiControllerPacket) queuedPacket))
 									{
 										// Batching was successful, so remove this packet
 										i.remove();
@@ -169,7 +166,7 @@ public class ControllerStream {
 						try {
 							sendPacket(packet);
 						} catch (IOException e) {
-							listener.connectionTerminated(e);
+							context.connListener.connectionTerminated(e);
 							return;
 						}
 					}
@@ -178,7 +175,7 @@ public class ControllerStream {
 						try {
 							sendPacket(packet);
 						} catch (IOException e) {
-							listener.connectionTerminated(e);
+							context.connListener.connectionTerminated(e);
 							return;
 						}
 					}
@@ -266,9 +263,35 @@ public class ControllerStream {
 	public void sendControllerInput(short buttonFlags, byte leftTrigger, byte rightTrigger,
 			short leftStickX, short leftStickY, short rightStickX, short rightStickY)
 	{
-		queuePacket(new ControllerPacket(buttonFlags, leftTrigger,
-				rightTrigger, leftStickX, leftStickY,
-				rightStickX, rightStickY));
+		if (context.serverGeneration == ConnectionContext.SERVER_GENERATION_3) {
+			// Use legacy controller packets for generation 3
+			queuePacket(new ControllerPacket(buttonFlags, leftTrigger,
+					rightTrigger, leftStickX, leftStickY,
+					rightStickX, rightStickY));
+		}
+		else {
+			// Use multi-controller packets for generation 4 and above
+			queuePacket(new MultiControllerPacket((short) 0, buttonFlags, leftTrigger,
+					rightTrigger, leftStickX, leftStickY,
+					rightStickX, rightStickY));
+		}
+	}
+	
+	public void sendControllerInput(short controllerNumber, short buttonFlags, byte leftTrigger, byte rightTrigger,
+			short leftStickX, short leftStickY, short rightStickX, short rightStickY)
+	{
+		if (context.serverGeneration == ConnectionContext.SERVER_GENERATION_3) {
+			// Use legacy controller packets for generation 3
+			queuePacket(new ControllerPacket(buttonFlags, leftTrigger,
+					rightTrigger, leftStickX, leftStickY,
+					rightStickX, rightStickY));
+		}
+		else {
+			// Use multi-controller packets for generation 4 and above
+			queuePacket(new MultiControllerPacket(controllerNumber, buttonFlags, leftTrigger,
+					rightTrigger, leftStickX, leftStickY,
+					rightStickX, rightStickY));
+		}
 	}
 	
 	public void sendMouseButtonDown(byte mouseButton)
