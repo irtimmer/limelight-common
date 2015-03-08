@@ -8,7 +8,6 @@ import java.net.SocketException;
 import java.util.LinkedList;
 
 import com.limelight.nvstream.ConnectionContext;
-import com.limelight.nvstream.av.ByteBufferDescriptor;
 import com.limelight.nvstream.av.RtpPacket;
 import com.limelight.nvstream.av.RtpReorderQueue;
 
@@ -68,16 +67,9 @@ public class AudioStream {
 	{
 		setupRtpSession();
 		
-		if (!setupAudio()) {
-			abort();
-			return false;
-		}
+		setupAudio();
 		
 		startReceiveThread();
-		
-		if ((streamListener.getCapabilities() & AudioRenderer.CAPABILITY_DIRECT_SUBMIT) == 0) {
-			startDecoderThread();
-		}
 		
 		startUdpPingThread();
 		
@@ -92,54 +84,12 @@ public class AudioStream {
 	
 	private boolean setupAudio()
 	{
-		int err;
-		
-		err = OpusDecoder.init();
-		if (err != 0) {
-			throw new IllegalStateException("Opus decoder failed to initialize");
-		}
-		
-		if (!streamListener.streamInitialized(OpusDecoder.getChannelCount(), OpusDecoder.getSampleRate())) {
+		if (!streamListener.streamInitialize()) {
 			return false;
 		}
 		
-		if ((streamListener.getCapabilities() & AudioRenderer.CAPABILITY_DIRECT_SUBMIT) != 0) {
-			depacketizer = new AudioDepacketizer(streamListener);
-		}
-		else {
-			depacketizer = new AudioDepacketizer(null);
-		}
-		
+		depacketizer = new AudioDepacketizer(streamListener);
 		return true;
-	}
-	
-	private void startDecoderThread()
-	{
-		// Decoder thread
-		Thread t = new Thread() {
-			@Override
-			public void run() {
-				
-				while (!isInterrupted())
-				{
-					ByteBufferDescriptor samples;
-					
-					try {
-						samples = depacketizer.getNextDecodedData();
-					} catch (InterruptedException e) {
-						context.connListener.connectionTerminated(e);
-						return;
-					}
-					
-					streamListener.playDecodedAudio(samples.data, samples.offset, samples.length);
-					depacketizer.freeDecodedData(samples);
-				}
-			}
-		};
-		threads.add(t);
-		t.setName("Audio - Player");
-		t.setPriority(Thread.NORM_PRIORITY + 2);
-		t.start();
 	}
 	
 	private void startReceiveThread()
