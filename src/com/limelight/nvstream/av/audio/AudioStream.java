@@ -26,9 +26,9 @@ public class AudioStream {
 	private boolean aborting = false;
 	
 	private ConnectionContext context;
-	private AudioRenderer streamListener;
+	private AudioDecoderRenderer streamListener;
 	
-	public AudioStream(ConnectionContext context, AudioRenderer streamListener)
+	public AudioStream(ConnectionContext context, AudioDecoderRenderer streamListener)
 	{
 		this.context = context;
 		this.streamListener = streamListener;

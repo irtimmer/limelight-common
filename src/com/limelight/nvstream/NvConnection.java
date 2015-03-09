@@ -13,7 +13,7 @@ import org.xmlpull.v1.XmlPullParserException;
 
 import com.limelight.LimeLog;
 import com.limelight.nvstream.av.audio.AudioStream;
-import com.limelight.nvstream.av.audio.AudioRenderer;
+import com.limelight.nvstream.av.audio.AudioDecoderRenderer;
 import com.limelight.nvstream.av.video.VideoDecoderRenderer;
 import com.limelight.nvstream.av.video.VideoStream;
 import com.limelight.nvstream.control.ControlStream;
@@ -42,7 +42,7 @@ public class NvConnection {
 	private int drFlags;
 	private Object videoRenderTarget;
 	private VideoDecoderRenderer videoDecoderRenderer;
-	private AudioRenderer audioRenderer;
+	private AudioDecoderRenderer audioRenderer;
 	
 	public NvConnection(String host, String uniqueId, NvConnectionListener listener, StreamConfiguration config, LimelightCryptoProvider cryptoProvider)
 	{		
@@ -324,7 +324,7 @@ public class NvConnection {
 		context.connListener.connectionStarted();
 	}
 
-	public void start(String localDeviceName, Object videoRenderTarget, int drFlags, AudioRenderer audioRenderer, VideoDecoderRenderer videoDecoderRenderer)
+	public void start(String localDeviceName, Object videoRenderTarget, int drFlags, AudioDecoderRenderer audioRenderer, VideoDecoderRenderer videoDecoderRenderer)
 	{
 		this.drFlags = drFlags;
 		this.audioRenderer = audioRenderer;

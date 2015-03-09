@@ -8,7 +8,7 @@ import com.limelight.nvstream.av.SequenceHelper;
 public class AudioDepacketizer {
 	
 	// Direct submit state
-	private AudioRenderer renderer;
+	private AudioDecoderRenderer renderer;
 	
 	// Cached objects
 	private ByteBufferDescriptor cachedDesc = new ByteBufferDescriptor(null, 0, 0);
@@ -16,7 +16,7 @@ public class AudioDepacketizer {
 	// Sequencing state
 	private short lastSequenceNumber;
 	
-	public AudioDepacketizer(AudioRenderer renderer)
+	public AudioDepacketizer(AudioDecoderRenderer renderer)
 	{
 		this.renderer = renderer;
 	}
