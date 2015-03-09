@@ -13,7 +13,7 @@ import org.xmlpull.v1.XmlPullParserException;
 
 import com.limelight.LimeLog;
 import com.limelight.nvstream.av.audio.AudioStream;
-import com.limelight.nvstream.av.audio.AudioRenderer;
+import com.limelight.nvstream.av.audio.AudioDecoderRenderer;
 import com.limelight.nvstream.av.video.VideoDecoderRenderer;
 import com.limelight.nvstream.av.video.VideoStream;
 import com.limelight.nvstream.control.ControlStream;
@@ -42,7 +42,7 @@ public class NvConnection {
 	private int drFlags;
 	private Object videoRenderTarget;
 	private VideoDecoderRenderer videoDecoderRenderer;
-	private AudioRenderer audioRenderer;
+	private AudioDecoderRenderer audioRenderer;
 	
 	public NvConnection(String host, String uniqueId, NvConnectionListener listener, StreamConfiguration config, LimelightCryptoProvider cryptoProvider)
 	{		
@@ -139,17 +139,26 @@ public class NvConnection {
 			context.connListener.displayMessage("Device not paired with computer");
 			return false;
 		}
-				
-		NvApp app = h.getApp(context.streamConfig.getApp());
-		if (app == null) {
-			context.connListener.displayMessage("The app " + context.streamConfig.getApp() + " is not in GFE app list");
-			return false;
+		
+		NvApp app = context.streamConfig.getApp();
+		
+		// If the client did not provide an exact app ID, do a lookup with the applist
+		if (!context.streamConfig.getApp().isInitialized()) {
+			LimeLog.info("Using deprecated app lookup method - Please specify an app ID in your StreamConfiguration instead");
+			app = h.getAppByName(context.streamConfig.getApp().getAppName());
+			if (app == null) {
+				context.connListener.displayMessage("The app " + context.streamConfig.getApp().getAppName() + " is not in GFE app list");
+				return false;
+			}
 		}
+		
+		// Update the running status of the app
+		app.setIsRunning(h.getCurrentGame(serverInfo) == app.getAppId());
 		
 		// If there's a game running, resume it
 		if (h.getCurrentGame(serverInfo) != 0) {
 			try {
-				if (h.getCurrentGame(serverInfo) == app.getAppId()) {
+				if (app.getIsRunning()) {
 					if (!h.resumeApp(context)) {
 						context.connListener.displayMessage("Failed to resume existing session");
 						return false;
@@ -185,12 +194,24 @@ public class NvConnection {
 
 	protected boolean quitAndLaunch(NvHTTP h, NvApp app) throws IOException,
 			XmlPullParserException {
-		if (!h.quitApp()) {
-			context.connListener.displayMessage("Failed to quit previous session! You must quit it manually");
-			return false;
-		} else {
-			return launchNotRunningApp(h, app);
+		try {
+			if (!h.quitApp()) {
+				context.connListener.displayMessage("Failed to quit previous session! You must quit it manually");
+				return false;
+			} 
+		} catch (GfeHttpResponseException e) {
+			if (e.getErrorCode() == 599) {
+				context.connListener.displayMessage("This session wasn't started by this device," +
+						" so it cannot be quit. End streaming on the original " +
+						"device or the PC itself. (Error code: "+e.getErrorCode()+")");
+				return false;
+			}
+			else {
+				throw e;
+			}
 		}
+
+		return launchNotRunningApp(h, app);
 	}
 	
 	private boolean launchNotRunningApp(NvHTTP h, NvApp app) 
@@ -254,7 +275,7 @@ public class NvConnection {
 
 			if (currentStage == NvConnectionListener.Stage.LAUNCH_APP) {
 				// Display the app name instead of the stage name
-				currentStage.setName(context.streamConfig.getApp());
+				currentStage.setName(context.streamConfig.getApp().getAppName());
 			}
 			
 			context.connListener.stageStarting(currentStage);
@@ -303,7 +324,7 @@ public class NvConnection {
 		context.connListener.connectionStarted();
 	}
 
-	public void start(String localDeviceName, Object videoRenderTarget, int drFlags, AudioRenderer audioRenderer, VideoDecoderRenderer videoDecoderRenderer)
+	public void start(String localDeviceName, Object videoRenderTarget, int drFlags, AudioDecoderRenderer audioRenderer, VideoDecoderRenderer videoDecoderRenderer)
 	{
 		this.drFlags = drFlags;
 		this.audioRenderer = audioRenderer;

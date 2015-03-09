@@ -51,7 +51,7 @@ public class NvHTTP {
 	public static final int CONNECTION_TIMEOUT = 3000;
 	public static final int READ_TIMEOUT = 5000;
 	
-	private final boolean verbose = false;
+	private static boolean verbose = false;
 
 	public String baseUrl;
 	
@@ -176,7 +176,7 @@ public class NvHTTP {
 		
 		details.name = getXmlString(serverInfo, "hostname").trim();
 		details.uuid = UUID.fromString(getXmlString(serverInfo, "uniqueid").trim());
-		details.macAddress = getXmlString(serverInfo, "mac");
+		details.macAddress = getXmlString(serverInfo, "mac").trim();
 
 		// If there's no LocalIP field, use the address we hit the server on
 		String localIpStr = getXmlString(serverInfo, "LocalIP");
@@ -256,7 +256,20 @@ public class NvHTTP {
 	}
 	
 	String openHttpConnectionToString(String url, boolean enableReadTimeout) throws MalformedURLException, IOException {
-		ResponseBody resp = openHttpConnection(url, enableReadTimeout);
+		if (verbose) {
+			LimeLog.info("Requesting URL: "+url);
+		}
+		
+		ResponseBody resp;
+		try {
+			resp = openHttpConnection(url, enableReadTimeout);
+		} catch (IOException e) {
+			if (verbose) {
+				e.printStackTrace();
+			}
+			throw e;
+		}
+		
 		Scanner s = new Scanner(resp.byteStream());
 		
 		String str = "";
@@ -268,7 +281,7 @@ public class NvHTTP {
 		resp.close();
 		
 		if (verbose) {
-			System.out.println(str);
+			LimeLog.info(url+" -> "+str);
 		}
 		
 		return str;
@@ -291,11 +304,24 @@ public class NvHTTP {
 		return Integer.parseInt(game);
 	}
 	
-	public NvApp getApp(String app) throws IOException,
-			XmlPullParserException {
+	public NvApp getAppById(int appId) throws IOException, XmlPullParserException {
 		LinkedList<NvApp> appList = getAppList();
 		for (NvApp appFromList : appList) {
-			if (appFromList.getAppName().equals(app)) {
+			if (appFromList.getAppId() == appId) {
+				return appFromList;
+			}
+		}
+		return null;
+	}
+	
+	/* NOTE: Only use this function if you know what you're doing.
+	 * It's totally valid to have two apps named the same thing,
+	 * or even nothing at all! Look apps up by ID if at all possible
+	 * using the above function */
+	public NvApp getAppByName(String appName) throws IOException, XmlPullParserException {
+		LinkedList<NvApp> appList = getAppList();
+		for (NvApp appFromList : appList) {
+			if (appFromList.getAppName().equalsIgnoreCase(appName)) {
 				return appFromList;
 			}
 		}
@@ -315,6 +341,7 @@ public class NvHTTP {
 		int eventType = xpp.getEventType();
 		LinkedList<NvApp> appList = new LinkedList<NvApp>();
 		Stack<String> currentTag = new Stack<String>();
+		boolean rootTerminated = false;
 
 		while (eventType != XmlPullParser.END_DOCUMENT) {
 			switch (eventType) {
@@ -329,19 +356,27 @@ public class NvHTTP {
 				break;
 			case (XmlPullParser.END_TAG):
 				currentTag.pop();
+				if (xpp.getName().equals("root")) {
+					rootTerminated = true;
+				}
 				break;
 			case (XmlPullParser.TEXT):
 				NvApp app = appList.getLast();
 				if (currentTag.peek().equals("AppTitle")) {
-					app.setAppName(xpp.getText());
+					app.setAppName(xpp.getText().trim());
 				} else if (currentTag.peek().equals("ID")) {
-					app.setAppId(xpp.getText());
+					app.setAppId(xpp.getText().trim());
 				} else if (currentTag.peek().equals("IsRunning")) {
-					app.setIsRunning(xpp.getText());
+					app.setIsRunning(xpp.getText().trim());
 				}
 				break;
 			}
 			eventType = xpp.next();
+		}
+		
+		// Throw a malformed XML exception if we've not seen the root tag ended
+		if (!rootTerminated) {
+			throw new XmlPullParserException("Malformed XML: Root tag was not terminated");
 		}
 		
 		// Ensure that all apps in the list are initialized
@@ -364,14 +399,26 @@ public class NvHTTP {
 	}
 	
 	public LinkedList<NvApp> getAppList() throws GfeHttpResponseException, IOException, XmlPullParserException {
-		ResponseBody resp = openHttpConnection(baseUrl + "/applist?uniqueid=" + uniqueId, true);
-		LinkedList<NvApp> appList = getAppListByReader(new InputStreamReader(resp.byteStream()));
-		resp.close();
-		return appList;
+		if (verbose) {
+			// Use the raw function so the app list is printed
+			return getAppListByReader(new StringReader(getAppListRaw()));
+		}
+		else {
+			ResponseBody resp = openHttpConnection(baseUrl + "/applist?uniqueid=" + uniqueId, true);
+			LinkedList<NvApp> appList = getAppListByReader(new InputStreamReader(resp.byteStream()));
+			resp.close();
+			return appList;
+		}
 	}
 	
 	public void unpair() throws IOException {
 		openHttpConnectionToString(baseUrl + "/unpair?uniqueid=" + uniqueId, true);
+	}
+	
+	public InputStream getBoxArt(NvApp app) throws IOException {
+		ResponseBody resp = openHttpConnection(baseUrl + "/appasset?uniqueid=" + uniqueId +
+				"&appid=" + app.getAppId() + "&AssetType=2&AssetIdx=0", true);
+		return resp.byteStream();
 	}
 
 	final private static char[] hexArray = "0123456789ABCDEF".toCharArray();
