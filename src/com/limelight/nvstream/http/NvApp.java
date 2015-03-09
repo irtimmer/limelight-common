@@ -8,6 +8,18 @@ public class NvApp {
 	private boolean isRunning;
 	private boolean initialized;
 	
+	public NvApp() {}
+	
+	public NvApp(String appName) {
+		this.appName = appName;
+	}
+	
+	public NvApp(String appName, int appId) {
+		this.appName = appName;
+		this.appId = appId;
+		this.initialized = true;
+	}
+	
 	public void setAppName(String appName) {
 		this.appName = appName;
 	}
@@ -21,11 +33,16 @@ public class NvApp {
 		}
 	}
 	
+	public void setAppId(int appId) {
+		this.appId = appId;
+		this.initialized = true;
+	}
+	
 	public void setIsRunning(String isRunning) {
 		this.isRunning = isRunning.equals("1");
 	}
 	
-	public void setIsRunningBoolean(boolean isRunning) {
+	public void setIsRunning(boolean isRunning) {
 		this.isRunning = isRunning;
 	}
 	
